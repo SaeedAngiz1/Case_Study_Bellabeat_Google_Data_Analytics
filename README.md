@@ -17,6 +17,8 @@
 **Google Data Analytics Capstone · Case Study 2**
 Mohammad Saeed Angiz
 
+**English · [Deutsch](README_de.md) · [فارسی](README_fa.md)**
+
 <br>
 
 ![Key findings](images/findings.gif)
