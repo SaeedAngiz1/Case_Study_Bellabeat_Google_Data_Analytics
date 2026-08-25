@@ -1,0 +1,837 @@
+---
+title: "Fallstudie Bellabeat"
+author: "Mohammad Saeed Angiz"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 5, dpi = 110, fig.align = "center")
+```
+
+```{r libraries}
+library(tidyverse)
+library(readr)
+library(ggplot2)
+library(tibble)
+library(lubridate)
+library(janitor)
+library(scales)
+library(knitr)
+library(dplyr)
+Sys.setlocale("LC_TIME", "C")  # englische Wochentagsnamen unabhaengig vom Systemgebietsschema
+```
+
+```{r wochentage, include=FALSE}
+# Wochentagsbeschriftungen fuer die Diagramme. Die Daten bleiben in englischer
+# Reihenfolge (Sonntag zuerst), nur die Anzeige wird uebersetzt.
+WOCHENTAGE <- c(Sunday = "Sonntag", Monday = "Montag", Tuesday = "Dienstag",
+                Wednesday = "Mittwoch", Thursday = "Donnerstag",
+                Friday = "Freitag", Saturday = "Samstag")
+```
+
+```{r load and clean, include=FALSE}
+# ---- Pfade --------------------------------------------------------------
+# Quelle: https://www.kaggle.com/datasets/arashnic/fitbit
+# HINWEIS: Schraegstriche verwenden. In R ist "C:\Users\..." ein Fehler,
+# \U und \F werden als Escape-Sequenzen gelesen, nicht als Backslashes.
+BASE <- "C:/Users/angiz/Desktop/FitBit Fitness Tracker Data"
+P1 <- file.path(BASE, "mturkfitbit_export_3.12.16-4.11.16", "Fitabase Data 3.12.16-4.11.16")
+P2 <- file.path(BASE, "mturkfitbit_export_4.12.16-5.12.16", "Fitabase Data 4.12.16-5.12.16")
+
+# Frueh und mit lesbarer Meldung abbrechen statt mit einem kryptischen read_csv-Fehler
+stopifnot("Datenordner nicht gefunden, BASE pruefen" = dir.exists(BASE))
+stopifnot("Export-Unterordner nicht gefunden. Sind die Dateien entpackt?" =
+            dir.exists(P1) && dir.exists(P2))
+
+# ---- Tagesaktivitaet: beide Exportzeitraeume ----------------------------
+daily_raw <- bind_rows(
+  read_csv(file.path(P1, "dailyActivity_merged.csv"), show_col_types = FALSE) |>
+    mutate(period = "12. Maerz bis 11. April"),
+  read_csv(file.path(P2, "dailyActivity_merged.csv"), show_col_types = FALSE) |>
+    mutate(period = "12. April bis 12. Mai")
+) |>  clean_names()
+
+daily <- daily_raw |>
+  mutate(date = mdy(activity_date)) |>
+  distinct(id, date, .keep_all = TRUE) |>
+  mutate(weekday     = wday(date, label = TRUE, abbr = FALSE),
+         is_wear_day = total_steps > 0)
+
+worn <- daily |>  filter(is_wear_day)
+
+# ---- Schlaf: April-Tageswerte plus Aggregat der Maerz-Minutenwerte ------
+sleep_apr_raw <- read_csv(file.path(P2, "sleepDay_merged.csv"), show_col_types = FALSE) |>
+  clean_names()
+
+sleep_apr <- sleep_apr_raw |>
+  mutate(date = as_date(mdy_hms(sleep_day))) |>
+  distinct(id, date, .keep_all = TRUE) |>
+  transmute(id, date,
+            minutes_asleep = total_minutes_asleep,
+            time_in_bed    = total_time_in_bed)
+
+sleep_mar <- read_csv(file.path(P1, "minuteSleep_merged.csv"), show_col_types = FALSE) |>
+  clean_names() |>
+  distinct(id, date, .keep_all = TRUE) |>
+  mutate(ts = mdy_hms(date), sleep_date = as_date(ts - hours(6))) |>
+  group_by(id, date = sleep_date) |>
+  summarise(minutes_asleep = sum(value == 1), time_in_bed = n(), .groups = "drop") |>
+  filter(time_in_bed >= 60)
+
+sleep <- bind_rows(sleep_mar, sleep_apr) |>
+  distinct(id, date, .keep_all = TRUE) |>
+  mutate(hours_asleep     = minutes_asleep / 60,
+         awake_in_bed     = time_in_bed - minutes_asleep,
+         sleep_efficiency = minutes_asleep / time_in_bed)
+
+# ---- Stuendliche Schritte und Gewichtsprotokolle ------------------------
+hourly <- bind_rows(
+  read_csv(file.path(P1, "hourlySteps_merged.csv"), show_col_types = FALSE),
+  read_csv(file.path(P2, "hourlySteps_merged.csv"), show_col_types = FALSE)
+) |>  clean_names() |>
+  mutate(ts = mdy_hms(activity_hour), hour = hour(ts)) |>
+  distinct(id, ts, .keep_all = TRUE)
+
+weight <- bind_rows(
+  read_csv(file.path(P1, "weightLogInfo_merged.csv"), show_col_types = FALSE),
+  read_csv(file.path(P2, "weightLogInfo_merged.csv"), show_col_types = FALSE)
+) |>  clean_names() |>
+  mutate(date = as_date(mdy_hms(date))) |>
+  distinct(id, date, .keep_all = TRUE)
+
+# ---- Diagrammgestaltung -------------------------------------------------
+TEAL <- "#3E7C79"; MINT <- "#7FC8A9"; CORAL <- "#E8836F"
+SAND <- "#F2C57C"; SLATE <- "#5C6B73"; GREY <- "#D9DEE0"
+
+theme_bb <- theme_minimal(base_size = 12) +
+  theme(plot.title    = element_text(face = "bold", size = 14),
+        plot.subtitle = element_text(colour = SLATE, size = 10),
+        panel.grid.minor = element_blank())
+
+n_users <- n_distinct(daily$id)
+```
+
+# Zusammenfassung
+
+Zwei Monate Fitbit-Trackerdaten von `r n_users` Nutzenden zeigen, dass der
+Wellnessmarkt die falsche Gewohnheit verkauft. Der staerkste Zusammenhang in den
+Daten besteht nicht zwischen Schritten und Gesundheit, sondern zwischen
+**Stillsitzen und schlechtem Schlaf**.
+
+```{r headline stats}
+tibble(
+  Kennzahl = c("Ausgewertete Nutzende", "Tage mit erfasster Aktivitaet", "Naechte mit Schlafdaten",
+               "Mediane Tragequote", "Durchschnittliche Sitzzeit pro Tag",
+               "Naechte unter 7 Stunden Schlaf", "Tage mit 10.000 Schritten",
+               "Korrelation: Sitzzeit und Schlaf"),
+  Wert = c(
+    as.character(n_users),
+    comma(nrow(worn)),
+    comma(nrow(sleep)),
+    percent(median((worn |>  count(id, name = "d") |>
+      left_join(daily |>  distinct(id, period) |>
+        left_join(daily |>  group_by(period) |>
+          summarise(w = as.numeric(max(date) - min(date)) + 1, .groups = "drop"),
+          by = "period") |>  group_by(id) |>
+        summarise(w = sum(w), .groups = "drop"), by = "id") |>
+      mutate(r = d / w))$r), 1),
+    paste0(round(mean(worn$sedentary_minutes) / 60, 1), " Stunden"),
+    percent(mean(sleep$hours_asleep < 7), 0.1),
+    percent(mean(worn$total_steps >= 10000), 0.1),
+    round(cor((worn |>  inner_join(sleep, by = c("id", "date")))$sedentary_minutes,
+              (worn |>  inner_join(sleep, by = c("id", "date")))$hours_asleep), 2)
+  )
+) |>  kable(caption = "Wichtigste Kennzahlen")
+```
+
+**Die drei wichtigsten Empfehlungen:** das feste Ziel von 10.000 Schritten durch ein
+anpassungsfaehiges Ziel ersetzen; die Bellabeat-App ueber den Zusammenhang
+"weniger sitzen, besser schlafen" vermarkten; und Benachrichtigungen auf die
+beiden Stunden legen, in denen sich die Nutzenden ohnehin bewegen.
+
+---
+
+# 1. Fragen: Zusammenfassung der Geschaeftsaufgabe
+
+> **Ergebnis 1: Eine klare Zusammenfassung der Geschaeftsaufgabe**
+
+Bellabeat ist ein Hightech-Hersteller von gesundheitsorientierten Produkten fuer
+Frauen, gegruendet 2013 von Urška Sršen und Sando Mur. Die Produktlinie umfasst
+die Bellabeat-App, den Leaf-Tracker, die Time-Uhr, die Spring-Wasserflasche und
+eine Abonnement-Mitgliedschaft.
+
+Urška Sršen ist ueberzeugt, dass die Auswertung von Fitnessdaten intelligenter
+Geraete neues Wachstum erschliessen kann. Sie hat das Marketing-Analyseteam
+gebeten, Nutzungsdaten von **intelligenten Geraeten anderer Hersteller** zu
+analysieren, **ein Bellabeat-Produkt** auszuwaehlen und Empfehlungen auf hoher
+Ebene fuer die Marketingstrategie zu erarbeiten.
+
+### Die Geschaeftsaufgabe
+
+> Ermitteln, wie Verbraucherinnen und Verbraucher intelligente Geraete anderer
+> Hersteller tatsaechlich nutzen, und bestimmen, welche der daraus erkennbaren
+> Verhaltensluecken Bellabeat durch die Vermarktung der Bellabeat-App schliessen
+> kann.
+
+### Leitfragen, die dieser Bericht beantwortet
+
+1. Welche Trends gibt es bei der Nutzung intelligenter Geraete?
+2. Wie lassen sich diese Trends auf Bellabeat-Kundinnen uebertragen?
+3. Wie koennen diese Trends die Marketingstrategie von Bellabeat beeinflussen?
+
+### Wichtigste Beteiligte
+
+| Beteiligte Person | Rolle | Was sie daraus braucht |
+|---|---|---|
+| Urška Sršen | Mitgruenderin, Chief Creative Officer | Wachstumschancen mit belastbarer Grundlage |
+| Sando Mur | Mitgruender, Geschaeftsleitung | Analytisch fundierte Schlussfolgerungen |
+| Marketing-Analyseteam | Kolleginnen und Kollegen | Eine reproduzierbare Basis fuer Kampagnenentscheidungen |
+
+### Ausgewaehltes Produkt
+
+Die **Bellabeat-App**. Sie verbindet alle Geraete der Produktlinie, ist die
+Oberflaeche, ueber die Verhaltensimpulse ausgeliefert werden, und traegt das
+Abonnement. Erkenntnisse ueber Verhalten lassen sich dort am schnellsten und
+guenstigsten umsetzen.
+
+---
+
+# 2. Vorbereiten: Beschreibung der Datenquellen
+
+> **Ergebnis 2: Eine Beschreibung aller verwendeten Datenquellen**
+
+## Quelle und Lizenz
+
+<a class="kaggle-btn" href="https://www.kaggle.com/datasets/arashnic/fitbit" target="_blank" rel="noopener">Datensatz auf Kaggle herunterladen</a>
+
+| Punkt | Details |
+|---|---|
+| Datensatz | FitBit Fitness Tracker Data |
+| Bereitgestellt von | Mobius, ueber [Kaggle](https://www.kaggle.com/datasets/arashnic/fitbit) |
+| Lizenz | CC0 gemeinfrei, keine Nutzungsbeschraenkung |
+| Erhebung | Umfrage ueber Amazon Mechanical Turk, 12. Maerz bis 12. Mai 2016 |
+| Einwilligung | Die Teilnehmenden haben der Uebermittlung ihrer Trackerdaten ausdruecklich zugestimmt |
+| Datenschutz | Keine Namen, Adressen oder demografischen Angaben; Nutzende nur ueber eine numerische ID identifiziert |
+| Speicherung | Lokal in datierten Unterordnern abgelegt; die Originaldateien wurden nicht veraendert |
+
+Da die Daten unter CC0 stehen und keine personenbezogenen Kennungen enthalten,
+bestehen fuer diese Analyse keine lizenz-, datenschutz- oder sicherheitsrechtlichen
+Huerden. Die gesamte Bereinigung erfolgte an Kopien; die Quelldateien im
+`.csv`-Format wurden nie ueberschrieben.
+
+## Wie die Daten aufgebaut sind
+
+Der Datensatz wird als **zwei Exportordner fuer aufeinanderfolgende Monate**
+ausgeliefert:
+
+- `mturkfitbit_export_3.12.16-4.11.16`, 12. Maerz bis 11. April 2016
+- `mturkfitbit_export_4.12.16-5.12.16`, 12. April bis 12. Mai 2016
+
+Beide enthalten dieselben Messwerte auf vier Detailebenen: Tag, Stunde, Minute
+und Sekunde, jeweils im langen (`Narrow`) und im breiten Format.
+
+**Die meisten veroeffentlichten Analysen dieses Datensatzes nutzen nur den zweiten
+Ordner.** Beide Ordner haben ein identisches Schema in
+`dailyActivity_merged.csv`, deshalb kombiniert diese Analyse sie:
+
+```{r Scope Comparison}
+tibble(
+  Umfang = c("Uebliche Analyse mit einem Ordner", "Diese Analyse (beide Ordner)"),
+  Nutzende = c(33, n_users),
+  `Abgedeckte Tage` = c(31, as.numeric(max(daily$date) - min(daily$date)) + 1),
+  `Naechte mit Schlafdaten` = c(410, nrow(sleep))
+) |>  kable(caption = "Die Kombination beider Exportordner verdoppelt die Datengrundlage annaehernd")
+```
+
+## Ausgewaehlte Dateien und die Gruende dafuer
+
+Von den 18 verfuegbaren Dateien tragen sechs die Analyse. `dailySteps_merged.csv`,
+`dailyCalories_merged.csv` und `dailyIntensities_merged.csv` wurden
+ausgeschlossen, weil sie Spalten doppeln, die bereits in
+`dailyActivity_merged.csv` enthalten sind. Das wurde geprueft, nicht angenommen:
+
+```{r Redundancy check}
+steps_only <- read_csv(file.path(P2, "dailySteps_merged.csv"), show_col_types = FALSE)
+activity   <- read_csv(file.path(P2, "dailyActivity_merged.csv"), show_col_types = FALSE)
+
+check <- steps_only |>  rename(day = ActivityDay) |>
+  inner_join(activity |>  rename(day = ActivityDate), by = c("Id", "day"))
+
+cat("Verglichene Nutzertage:", nrow(check), "\n")
+cat("Schrittzahlen in jeder Zeile identisch:", all(check$StepTotal == check$TotalSteps), "\n")
+```
+
+| Verwendete Datei | Zweck |
+|---|---|
+| `dailyActivity_merged` | Schritte, Distanz, Intensitaetsminuten und Kalorien pro Tag |
+| `hourlySteps_merged` | Aktivitaetsmuster im Tagesverlauf |
+| `sleepDay_merged` | Naechtliche Schlafsummen, Zeitraum April |
+| `minuteSleep_merged` | Zu Naechten aggregiert, erweitert die Schlafabdeckung auf Maerz |
+| `weightLogInfo_merged` | Nutzung von Funktionen und Verhalten bei manueller Eingabe |
+
+`heartrate_seconds_merged.csv` wurde ausgeschlossen: 86 MB fuer nur 14 von
+`r n_users` Nutzenden, eine zu kleine Teilstichprobe fuer eine belastbare
+Aussage. Die minutengenauen Aktivitaetsdateien wurden als redundant zu den
+stuendlichen und taeglichen Aggregaten ausgeschlossen.
+
+## Datenintegritaet und Glaubwuerdigkeit: erfuellt der Datensatz ROCCC?
+
+```{r ROCCC}
+tibble(
+  Kriterium = c("Reliable (verlaesslich)", "Original (urspruenglich)",
+                "Comprehensive (vollstaendig)", "Current (aktuell)",
+                "Cited (belegt)"),
+  Bewertung = c("Schwach", "Schwach", "Schwach", "Mangelhaft", "Gut"),
+  Details = c(
+    paste0(n_users, " selbst ausgewaehlte Teilnehmende; keine unabhaengige Pruefung"),
+    "Weitergabe durch Dritte, nicht von Fitbit oder Bellabeat erhoben",
+    "Weder Alter noch Geschlecht, Groesse, Ort oder gesundheitliche Ausgangslage erfasst",
+    "2016 erhoben; Hardware und Nutzererwartungen haben sich seitdem veraendert",
+    "Klar belegt und offen unter CC0 lizenziert"
+  )
+) |>  kable(caption = "ROCCC-Bewertung der FitBit Fitness Tracker Data")
+```
+
+**Dieser Datensatz erfuellt ROCCC nicht gut, und das wird vor den Ergebnissen
+festgehalten, nicht danach.** Die Stichprobe ist klein und selbst ausgewaehlt,
+und sie enthaelt **kein Feld zum Geschlecht**. Das ist eine erhebliche
+Einschraenkung bei einer Analyse fuer ein Unternehmen, das ausschliesslich an
+Frauen verkauft. Jedes Ergebnis unten ist ein Richtungssignal, das an Bellabeats
+eigenen Daten zu pruefen ist, keine Grundlage fuer Budgetentscheidungen.
+
+Sršen hat angeregt, einen zusaetzlichen Datensatz einzubeziehen, um diese Grenzen
+zu adressieren. Am wertvollsten waeren Bellabeats eigene App-Telemetriedaten, in
+denen Geschlecht, Alter und Produktlinie bekannt sind.
+
+---
+
+# 3. Verarbeiten: Dokumentation der Datenbereinigung
+
+> **Ergebnis 3: Dokumentation jeder Bereinigung und Umformung der Daten**
+
+## Gewaehlte Werkzeuge
+
+**R mit dem tidyverse**, aus drei Gruenden: Der Datensatz sprengt auf
+Minutenebene den komfortablen Arbeitsbereich von Excel (ueber 1,3 Millionen
+Zeilen); jeder Bereinigungsschritt ist als Code festgehalten und damit
+reproduzierbar und pruefbar; und dieselbe Umgebung erledigt Bereinigung,
+Statistik und Visualisierung, ohne zwischen Werkzeugen exportieren zu muessen.
+Dieses Dokument ist in R Markdown geschrieben, jede genannte Zahl entsteht daher
+beim Rendern und wird nicht von Hand eingetragen.
+
+## Pruefung auf Fehler
+
+```{r Integrity checks}
+tibble(
+  Pruefung = c("Doppelte Zeilen in der Tagesaktivitaet",
+               "Doppelte Zeilen im Schlaf (April-Tageswerte)",
+               "Fehlende Werte in der Tagesaktivitaet",
+               "Tage mit null Schritten",
+               "Gewichtseintraege ohne Koerperfettwert"),
+  Ergebnis = c(
+    sum(duplicated(daily_raw)),
+    sum(duplicated(sleep_apr_raw)),
+    sum(is.na(daily_raw)),
+    sum(!daily$is_wear_day),
+    sum(is.na(weight$fat))
+  )
+) |>  kable(caption = "Integritaetspruefungen vor jeder Analyse")
+```
+
+## Durchgefuehrte Bereinigungsschritte
+
+1. **Beide Exportordner zusammengefuehrt** fuer Tagesaktivitaet, stuendliche
+   Schritte und Gewicht, nachdem die identischen Schemata bestaetigt waren. Eine
+   Spalte `period` haelt fest, aus welchem Zeitraum jede Zeile stammt.
+2. **Spaltennamen vereinheitlicht** zu `snake_case` mit `janitor::clean_names()`.
+3. **Datumsangaben aus Text geparst.** `read_csv()` importiert `"4/12/2016"` als
+   Zeichenkette; `lubridate::mdy()` und `mdy_hms()` wandeln diese in
+   Datumsobjekte um, damit sie sortiert, gefiltert und nach Wochentag gruppiert
+   werden koennen.
+4. **Doppelte Datensaetze entfernt.** `sleepDay_merged.csv` enthaelt drei exakt
+   identische Zeilen, ein dokumentierter Mangel dieses Datensatzes. Die
+   Entfernung von Duplikaten ueber `id` und `date` wurde auf jede Tabelle
+   angewendet, als Absicherung an der Ordnergrenze.
+5. **Tage ohne Tragen getrennt behandelt.**
+6. **Maerz-Schlafdaten auf Minutenebene zu Nachtsummen aggregiert.**
+7. **Abgeleitete Felder:** Wochentag, gesamte Aktivminuten, Schlafstunden,
+   Wachminuten im Bett, Schlafeffizienz und Tragequote pro Nutzendem.
+
+## Umgang mit Tagen ohne Tragen
+
+`r sum(!daily$is_wear_day)` Zeilen weisen null Schritte auf, zusammen mit nahezu
+einem vollen Tag an Sitzminuten. Sie stehen fuer ein Geraet am Ladekabel, nicht
+fuer eine Person, die 24 Stunden bewegungslos war:
+
+```{r non wear profile}
+daily |>
+  group_by(`Art des Tages` = ifelse(is_wear_day, "Geraet getragen", "Null Schritte erfasst")) |>
+  summarise(Tage = n(),
+            `Mittlere Sitzminuten` = round(mean(sedentary_minutes)),
+            `Mittlere Kalorien` = round(mean(calories)), .groups = "drop") |>
+  kable(caption = "Tage mit null Schritten liegen im Mittel nahe bei 1.440 Sitzminuten, was bestaetigt, dass das Geraet nicht getragen wurde")
+```
+
+Diese Zeilen wurden **aus allen Aktivitaetsmittelwerten ausgeschlossen**, aber
+**fuer die Analyse der Geraetenutzung behalten**, wo sie der direkte Beleg dafuer
+sind, wie oft der Tracker getragen wird. Sie in die Mittelwerte einzubeziehen
+wuerde die Aktivitaet um rund 10 Prozent zu niedrig ausweisen.
+
+## Erweiterung der Schlafabdeckung auf den Maerz
+
+`sleepDay_merged.csv` existiert nur im April-Ordner. Diese Datei allein zu nutzen
+wuerde bedeuten, Aktivitaet aus beiden Monaten heranzuziehen, Schlaf aber nur aus
+einem. `minuteSleep_merged.csv` deckt den Maerz auf Minutenebene ab. Dort ist
+`value` codiert als 1 = schlafend, 2 = unruhig, 3 = wach, und jede Zeile steht
+fuer eine Minute im Bett. Die Zeilen pro Nacht zu zaehlen ergibt die Zeit im
+Bett; `value == 1` zu zaehlen ergibt die Schlafminuten. Das sind genau die beiden
+Groessen, die auch die April-Datei ausweist.
+
+**Erklaerte Annahme:** Schlaf ueberschreitet Mitternacht, eine Gruppierung nach
+Kalenderdatum wuerde eine einzelne Nacht auf zwei Datensaetze aufteilen. Sechs
+Stunden abzuziehen, bevor das Datum gebildet wird, ordnet die Minuten vor
+Tagesanbruch der vorherigen Nacht zu. Datensaetze unter 60 Minuten wurden als
+Fragmente verworfen, nicht als Naechte gewertet. Diese Grenze bei 6 Uhr morgens
+ist eine Ermessensentscheidung. Den Maerz vollstaendig auszuschliessen
+reduziert die Datengrundlage von `r nrow(sleep)` auf 410 Naechte, ohne die
+Richtung oder Bedeutung eines Ergebnisses zu veraendern.
+
+## Pruefung der bereinigten Daten
+
+```{r Verify clean}
+tibble(
+  Tabelle = c("Tagesaktivitaet (Tage mit Tragen)", "Schlaf", "Stuendliche Schritte", "Gewichtsprotokolle"),
+  Zeilen = c(nrow(worn), nrow(sleep), nrow(hourly), nrow(weight)),
+  Nutzende = c(n_distinct(worn$id), n_distinct(sleep$id),
+               n_distinct(hourly$id), n_distinct(weight$id)),
+  `Zeitraum` = c(
+    paste(format(min(worn$date), "%d.%m."), "bis", format(max(worn$date), "%d.%m.%Y")),
+    paste(format(min(sleep$date), "%d.%m."), "bis", format(max(sleep$date), "%d.%m.%Y")),
+    paste(format(min(as_date(hourly$ts)), "%d.%m."), "bis", format(max(as_date(hourly$ts)), "%d.%m.%Y")),
+    paste(format(min(weight$date), "%d.%m."), "bis", format(max(weight$date), "%d.%m.%Y"))
+  )
+) |>  kable(caption = "Bereinigte Tabellen, bereit fuer die Analyse")
+```
+
+---
+
+# 4. Analysieren: Zusammenfassung der Analyse
+
+> **Ergebnis 4: Eine Zusammenfassung der Analyse**
+
+Die Analyse verlief in vier Durchgaengen. **Deskriptive Statistik** legte die
+Ausgangswerte fuer Aktivitaet, Schlaf und Kalorien im Vergleich zu
+veroeffentlichten Gesundheitsrichtwerten fest. **Segmentierung auf Nutzerebene**
+gruppierte die Teilnehmenden nach durchschnittlichen Tagesschritten und nach
+Tragequote, wobei immer zuerst pro Person aggregiert wurde, bevor Personen
+verglichen wurden, damit Teilnehmende mit mehr erfassten Tagen die Mittelwerte
+nicht dominieren. **Zeitliche Aggregation** untersuchte die Aktivitaet nach
+Tagesstunde und Wochentag. **Korrelation und Regression** pruefte die
+Zusammenhaenge zwischen Schritten, Kalorien, Sitzzeit und Schlafdauer.
+
+`Die zentrale Ueberraschung:` Die Groesse, die am staerksten mit Schlaf
+zusammenhaengt, ist nicht die Schrittzahl, sondern die **Sitzzeit**, und der
+Zusammenhang ist rund dreimal staerker. Das verschiebt die Marketingaussage von
+"mehr Sport" hin zu "weniger sitzen". Das ist eine deutlich niedrigere Huerde
+fuer die Nutzenden und eine Aussage, die derzeit kein grosser Wettbewerber trifft.
+
+```{r analysis Summary}
+sa <- worn |> inner_join(sleep, by = c("id", "date"))
+
+tibble(
+  Zusammenhang = c("Tagesschritte und verbrannte Kalorien",
+                   "Sitzminuten und verbrannte Kalorien",
+                   "Tagesschritte und Schlafstunden",
+                   "Sitzminuten und Schlafstunden"),
+  `Pearson r` = c(
+    round(cor(worn$total_steps, worn$calories), 3),
+    round(cor(worn$sedentary_minutes, worn$calories), 3),
+    round(cor(sa$total_steps, sa$hours_asleep), 3),
+    round(cor(sa$sedentary_minutes, sa$hours_asleep), 3)
+  ),
+  n = c(nrow(worn), nrow(worn), nrow(sa), nrow(sa))
+) |>  kable(caption = "Geprüfte Korrelationen. Nur Zusammenhang, die Wirkungsrichtung ist nicht geprueft.")
+```
+
+---
+
+# 5. Teilen: Visualisierungen und wichtigste Ergebnisse
+
+> **Ergebnis 5: Unterstuetzende Visualisierungen und wichtigste Ergebnisse**
+
+## Ergebnis 1: Das Geraet wird abgelegt, und das haeufig
+
+```{r finding 1}
+period_len <- daily |>  group_by(period) |>
+  summarise(days = as.numeric(max(date) - min(date)) + 1, .groups = "drop")
+
+user_window <- daily |>  distinct(id, period) |>
+  left_join(period_len, by = "period") |>
+  group_by(id) |>  summarise(window_days = sum(days), .groups = "drop")
+
+usage <- worn |>  count(id, name = "wear_days") |>
+  left_join(user_window, by = "id") |>
+  mutate(wear_rate = wear_days / window_days,
+         segment = case_when(wear_rate >= 0.80 ~ "Hohe Nutzung (80 bis 100%)",
+                             wear_rate >= 0.50 ~ "Mittlere Nutzung (50 bis 79%)",
+                             TRUE              ~ "Geringe Nutzung (unter 50%)") |>
+           factor(levels = c("Hohe Nutzung (80 bis 100%)", "Mittlere Nutzung (50 bis 79%)",
+                             "Geringe Nutzung (unter 50%)")))
+
+usage_sum <- usage |>  count(segment, .drop = FALSE) |>  mutate(pct = n / sum(n))
+
+ggplot(usage_sum, aes(reorder(segment, n), n, fill = segment)) +
+  geom_col(width = .62) +
+  geom_text(aes(label = paste0(n, " Nutzende (", percent(pct, 1), ")")),
+            hjust = -0.08, size = 3.8, colour = SLATE) +
+  coord_flip() + scale_y_continuous(expand = expansion(c(0, .3))) +
+  scale_fill_manual(values = c(TEAL, MINT, CORAL), guide = "none") +
+  labs(title = paste0("Die mediane Person trug den Tracker an nur ",
+                      percent(median(usage$wear_rate), 1), " der Tage"),
+       subtitle = "Tage mit erfassten Schritten, als Anteil am jeweiligen Exportzeitraum",
+       x = NULL, y = "Anzahl der Nutzenden") + theme_bb
+```
+
+Die mediane Person erfasste an `r percent(median(usage$wear_rate), 1)` der
+verfuegbaren Tage Schritte. **Keine einzige teilnehmende Person** trug das Geraet
+an `80%` oder mehr der Tage, und
+`r usage_sum$n[usage_sum$segment == "Geringe Nutzung (unter 50%)"]` trugen es an
+weniger als der Haelfte.
+
+**Warum das wichtig ist:** Ein Tracker, der ein Drittel seines Lebens in einer
+Schublade verbringt, kann weder zu Schlaf noch zu Stress oder Zyklus verlaessliche
+Erkenntnisse liefern. Die Nutzungshaeufigkeit ist die bindende Grenze fuer jede
+weitere Funktion.
+
+## Ergebnis 2: Das Ziel von 10.000 Schritten ist eine Mauer, kein Ziel
+
+```{r finding 2}
+user_avg <- worn |>  group_by(id) |>
+  summarise(avg_steps = mean(total_steps), .groups = "drop") |>
+  mutate(level = case_when(avg_steps < 5000  ~ "Sitzend (unter 5k)",
+                           avg_steps < 7500  ~ "Wenig aktiv (5 bis 7,5k)",
+                           avg_steps < 10000 ~ "Maessig aktiv (7,5 bis 10k)",
+                           TRUE              ~ "Aktiv (ueber 10k)") |>
+           factor(levels = c("Sitzend (unter 5k)", "Wenig aktiv (5 bis 7,5k)",
+                             "Maessig aktiv (7,5 bis 10k)", "Aktiv (ueber 10k)")))
+
+lvl <- user_avg |>  count(level, .drop = FALSE) |>  mutate(pct = n / sum(n))
+
+ggplot(lvl, aes(level, n, fill = level)) +
+  geom_col(width = .62) +
+  geom_text(aes(label = paste0(n, "\n", percent(pct, 1))),
+            vjust = -0.25, size = 3.6, colour = SLATE) +
+  scale_y_continuous(expand = expansion(c(0, .25))) +
+  scale_fill_manual(values = c(CORAL, SAND, MINT, TEAL), guide = "none") +
+  labs(title = paste0(sum(lvl$n[1:2]), " von ", sum(lvl$n),
+                      " Nutzenden liegen im Mittel unter 7.500 Schritten pro Tag"),
+       subtitle = "Nutzende gruppiert nach ihrer eigenen mittleren Tagesschrittzahl",
+       x = NULL, y = "Anzahl der Nutzenden") + theme_bb
+```
+
+Die mittlere Tagesschrittzahl lag bei `r comma(mean(worn$total_steps), 1)`, der
+Median bei `r comma(median(worn$total_steps), 1)`. Nur
+`r percent(mean(worn$total_steps >= 10000), 0.1)` der Tage erreichten 10.000
+Schritte.
+
+```{r finding 2 weekday}
+worn |>  group_by(weekday) |>
+  summarise(avg_steps = mean(total_steps), .groups = "drop") |>
+  ggplot(aes(weekday, avg_steps, fill = avg_steps)) +
+  geom_col(width = .68) +
+  geom_hline(yintercept = 10000, linetype = "dashed", colour = CORAL, linewidth = .7) +
+  annotate("text", x = 1, y = 10400, label = "Ziel: 10.000 Schritte",
+           colour = CORAL, size = 3.2, hjust = 0) +
+  scale_x_discrete(labels = WOCHENTAGE) +
+  scale_fill_gradient(low = MINT, high = TEAL, guide = "none") +
+  scale_y_continuous(labels = comma, expand = expansion(c(0, .12))) +
+  labs(title = "Kein Wochentag erreicht im Mittel das Ziel von 10.000 Schritten",
+       subtitle = "Der Sonntag ist der am wenigsten aktive Tag",
+       x = NULL, y = "Mittlere Schrittzahl") +
+  theme_bb
+```
+
+**Warum das wichtig ist:** Fuer die Haelfte der Nutzenden ist das voreingestellte
+Ziel unerreichbar. Ein Ziel, das taeglich verfehlt wird, wirkt nicht mehr
+motivierend, sondern erinnert an das Scheitern.
+
+## Ergebnis 3: Das Problem ist das Sitzen, nicht der fehlende Sport
+
+```{r finding-3, fig.height=3.6}
+mins <- worn |>
+  summarise(Sitzend = mean(sedentary_minutes), Leicht = mean(lightly_active_minutes),
+            Maessig = mean(fairly_active_minutes), Intensiv = mean(very_active_minutes)) |>
+  pivot_longer(everything(), names_to = "intensity", values_to = "minutes") |>
+  mutate(pct = minutes / sum(minutes),
+         intensity = factor(intensity, levels = c("Sitzend", "Leicht", "Maessig", "Intensiv")))
+
+ggplot(mins, aes("", minutes, fill = intensity)) +
+  geom_col(width = .55) +
+  geom_text(aes(label = ifelse(pct > .03, paste0(intensity, "\n", round(minutes), " Min"), "")),
+            position = position_stack(vjust = .5), size = 3.6,
+            colour = "white", fontface = "bold") +
+  coord_flip() + scale_fill_manual(values = c(SLATE, MINT, SAND, CORAL)) +
+  labs(title = paste0(percent(mins$pct[mins$intensity == "Sitzend"], 1),
+                      " der erfassten Zeit ist Sitzzeit"),
+       subtitle = "Mittlere Minuten pro getragenem Tag nach Intensitaetsstufe",
+       x = NULL, y = "Minuten", fill = NULL) +
+  theme_bb + theme(axis.text.y = element_blank())
+```
+
+Die Nutzenden kamen im Mittel auf `r round(mean(worn$sedentary_minutes) / 60, 1)`
+Sitzstunden pro erfasstem Tag gegenueber
+`r round(mean(worn$very_active_minutes), 1)` intensiv aktiven Minuten. An
+`r percent(mean((worn$fairly_active_minutes + worn$very_active_minutes) < 30), 0.1)`
+der Tage lag die Summe aus maessig und intensiv aktiver Zeit unter 30 Minuten.
+
+```{r finding 3 Scatter}
+ct <- cor.test(worn$total_steps, worn$calories)
+m  <- lm(calories ~ total_steps, data = worn)
+
+ggplot(worn, aes(total_steps, calories)) +
+  geom_point(alpha = .28, colour = TEAL, size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, colour = CORAL, fill = SAND) +
+  scale_x_continuous(labels = comma) + scale_y_continuous(labels = comma) +
+  labs(title = "Mehr Schritte bedeuten mehr verbrannte Kalorien, aber der Ertrag ist gering",
+       subtitle = paste0("r = ", round(ct$estimate, 2), ", etwa ",
+                         round(coef(m)[2] * 1000), " Kalorien je zusaetzliche 1.000 Schritte"),
+       x = "Schritte pro Tag", y = "Verbrannte Kalorien") + theme_bb
+```
+
+**Warum das wichtig ist:** Der ansprechbare Hebel sind die
+`r round(mean(worn$sedentary_minutes) / 60, 1)` Sitzstunden, nicht die
+`r round(mean(worn$very_active_minutes))` aktiven Minuten. Sitzphasen zu
+unterbrechen ist fuer die Nutzenden eine deutlich niedrigere Huerde, als
+zusaetzliche Trainingseinheiten einzuplanen.
+
+## Ergebnis 4: Aktivitaet ballt sich an zwei vorhersehbaren Spitzen
+
+```{r finding 4}
+by_hour <- hourly |>  group_by(hour) |>
+  summarise(avg_steps = mean(step_total), .groups = "drop")
+
+ggplot(by_hour |>  mutate(peak = hour %in% c(12, 13, 17, 18, 19)),
+       aes(factor(hour), avg_steps, fill = peak)) +
+  geom_col(width = .78) +
+  scale_fill_manual(values = c(`FALSE` = GREY, `TRUE` = TEAL), guide = "none") +
+  labs(title = "Die Aktivitaet erreicht mittags und erneut von 17 bis 19 Uhr ihre Spitzen",
+       subtitle = "Mittlere Schrittzahl je Tagesstunde, alle Nutzenden zusammengefasst",
+       x = "Stunde des Tages", y = "Mittlere Schrittzahl") + theme_bb
+```
+
+```{r finding 4 Table}
+by_hour |>  arrange(desc(avg_steps)) |>  head(5) |>
+  transmute(Stunde = paste0(hour, ":00"), `Mittlere Schrittzahl` = round(avg_steps)) |>
+  kable(caption = "Die fuenf aktivsten Stunden des Tages")
+```
+
+**Warum das wichtig ist:** Der Zeitpunkt von Benachrichtigungen ist bei den
+meisten Apps Raterei. In diesen Zeitfenstern sind die Nutzenden ohnehin in
+Bewegung und am ehesten fuer einen Impuls empfaenglich.
+
+## Ergebnis 5: Die Haelfte aller Naechte bleibt unter gesundem Schlaf
+
+```{r finding-5}
+ggplot(sleep, aes(hours_asleep)) +
+  geom_histogram(binwidth = .5, fill = TEAL, colour = "white") +
+  geom_vline(xintercept = 7, linetype = "dashed", colour = CORAL, linewidth = .8) +
+  annotate("text", x = 7.12, y = Inf, vjust = 2, hjust = 0, colour = CORAL, size = 3.4,
+           label = "7 Stunden = empfohlenes Minimum") +
+  labs(title = paste0(percent(mean(sleep$hours_asleep < 7), 1),
+                      " der Naechte bleiben unter 7 Stunden Schlaf"),
+       subtitle = paste0(nrow(sleep), " Naechte von ", n_distinct(sleep$id), " Nutzenden"),
+       x = "Stunden Schlaf", y = "Naechte") + theme_bb
+```
+
+Der mittlere Schlaf lag bei `r round(mean(sleep$hours_asleep), 2)` Stunden, mit
+durchschnittlich `r round(mean(sleep$awake_in_bed), 1)` Minuten, die wach im Bett
+verbracht wurden.
+
+```{r finding 5 key}
+ggplot(sa, aes(sedentary_minutes, hours_asleep)) +
+  geom_point(alpha = .3, colour = TEAL, size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, colour = CORAL, fill = SAND) +
+  geom_hline(yintercept = 7, linetype = "dotted", colour = SLATE) +
+  labs(title = "Je inaktiver der Tag, desto weniger Schlaf in der Nacht",
+       subtitle = paste0("r = ", round(cor(sa$sedentary_minutes, sa$hours_asleep), 2),
+                         " ueber ", nrow(sa), " zugeordnete Nutzertage"),
+       x = "Inaktive Minuten", y = "Stunden Schlaf") + theme_bb
+```
+
+**Warum das wichtig ist:** Das ist der Zusammenhang im Datensatz, aus dem sich am
+meisten ableiten laesst. Die Aussage lautet nicht "mehr gehen, besser schlafen",
+sondern **"weniger sitzen, besser schlafen"**, eine konkrete, belegbare und
+unterscheidbare Botschaft.
+
+## Ergebnis 6: Die Nutzung bricht ein, sobald Aufwand noetig wird
+
+```{r finding 6}
+adopt <- tibble(
+  feature = c("Aktivitaet (passiv)", "Schlaf (nachts tragen)", "Gewicht (manuelle Eingabe)"),
+  users   = c(n_distinct(daily$id), n_distinct(sleep$id), n_distinct(weight$id))
+) |>  mutate(pct = users / n_users)
+
+ggplot(adopt, aes(reorder(feature, pct), pct, fill = feature)) +
+  geom_col(width = .6) +
+  geom_text(aes(label = paste0(users, " Nutzende (", percent(pct, 1), ")")),
+            hjust = -0.08, size = 3.8, colour = SLATE) +
+  coord_flip() +
+  scale_y_continuous(labels = percent, limits = c(0, 1.3), expand = c(0, 0)) +
+  scale_fill_manual(values = c(TEAL, SAND, CORAL), guide = "none") +
+  labs(title = "Die Erfassung bricht ein, sobald manuelle Eingabe noetig ist",
+       subtitle = "Anteil der Nutzenden, die den jeweiligen Datentyp mindestens einmal erfasst haben",
+       x = NULL, y = "Anteil der Nutzenden") + theme_bb
+```
+
+`r percent(mean(weight$is_manual_report == TRUE, na.rm = TRUE), 0.1)` der
+Gewichtseintraege wurden von Hand eingetippt, mit einem Median von
+`r median(count(weight, id)$n)` Eintraegen je erfassender Person ueber den
+gesamten Zeitraum.
+
+**Warum das wichtig ist:** Jede zusaetzliche Huerde kostet rund ein Drittel der
+Nutzenden. Funktionen, die manuelle Eingaben verlangen, werden unabhaengig von
+der Gestaltungsqualitaet nicht angenommen.
+
+---
+
+# 6. Handeln: Empfehlungen
+
+> **Ergebnis 6: Die wichtigsten inhaltlichen Empfehlungen auf hoher Ebene**
+
+## Antworten auf die drei Leitfragen
+
+**1. Welche Trends gibt es bei der Nutzung intelligenter Geraete?**
+Die Geraete werden unregelmaessig getragen, im Median an
+`r percent(median(usage$wear_rate), 1)` der Tage, wobei keine Person `80%`
+ueberschreitet. Die Aktivitaet bleibt deutlich hinter gesundheitspolitischen
+Zielen zurueck: Nur `r percent(mean(worn$total_steps >= 10000), 0.1)` der Tage
+erreichen 10.000 Schritte, und `r round(mean(worn$sedentary_minutes) / 60, 1)`
+Stunden des durchschnittlich erfassten Tages sind Sitzzeit. Die Aktivitaet
+konzentriert sich auf die Mittagszeit und den fruehen Abend. Der Schlaf ist kurz,
+`r percent(mean(sleep$hours_asleep < 7), 0.1)` der Naechte bleiben unter sieben
+Stunden, und die Nutzung von Funktionen bricht ein, sobald manuelle Eingaben
+noetig werden.
+
+**2. Wie lassen sich diese Trends auf Bellabeat-Kundinnen uebertragen?**
+Bellabeat-Kundinnen nutzen dieselben Geraetekategorien zu denselben Zwecken,
+also gelten dieselben Verhaltensgrenzen. Zwei uebertragen sich am unmittelbarsten.
+Erstens begrenzt die Tragequote alles: Die Funktionen von Bellabeat zu Stress,
+Schlaf und Zyklus setzen konsequentes Tragen voraus, weshalb die Schmuckform des
+Leaf eine echte Einschraenkung adressiert und nicht bloss eine aeusserliche.
+Zweitens passt der Zusammenhang von Sitzzeit und Schlaf genau zu Bellabeats
+bestehender Positionierung rund um ganzheitliches Wohlbefinden statt sportlicher
+Leistung.
+
+**3. Wie koennen diese Trends die Marketingstrategie von Bellabeat beeinflussen?**
+Sie verschieben die Botschaft von Leistung zu Machbarkeit. Statt mit Fitbit und
+Apple ueber Schrittzahlen und Trainingsaufzeichnung zu konkurrieren, wo die Daten
+zeigen, dass die meisten Nutzenden scheitern, kann Bellabeat die niedrigere,
+erreichbarere und besser belegte Aussage besetzen: weniger sitzen, um besser zu
+schlafen.
+
+## Die drei wichtigsten Empfehlungen
+
+### 1. Das feste Schrittziel durch ein anpassungsfaehiges ersetzen
+
+Nur `r percent(mean(worn$total_steps >= 10000), 0.1)` der Tage erreichen 10.000
+Schritte, und `r sum(lvl$n[1:2])` von `r n_users` Nutzenden liegen im Mittel
+unter 7.500. Das Anfangsziel jeder Person aus ihrem eigenen Ausgangswert der
+ersten Woche ableiten und schrittweise anheben.
+
+*Werbeaussage:* **"Ein Ziel, das dich dort abholt, wo du stehst."**
+
+### 2. Die App ueber den Zusammenhang "weniger sitzen, besser schlafen" vermarkten
+
+Inaktive Zeit sagt kurzen Schlaf rund dreimal staerker voraus als die Schrittzahl
+(r = `r round(cor(sa$sedentary_minutes, sa$hours_asleep), 2)` gegenueber
+r = `r round(cor(sa$total_steps, sa$hours_asleep), 2)`). Die zentrale
+App-Funktion um diesen Zusammenhang herum aufbauen und stuendliche
+Bewegungserinnerungen mit dem Schlafwert verbinden.
+
+*Werbeaussage:* **"Heute weniger sitzen, heute Nacht besser schlafen."**
+
+### 3. Benachrichtigungen auf die beiden Spitzen legen
+
+Die Aktivitaet erreicht ihre Spitzen von 12 bis 14 Uhr und von 17 bis 19 Uhr.
+Bewegungsimpulse in diese Fenster legen, den Tagesplan in die ruhige Zeit um
+7 Uhr und einen Impuls zum Herunterfahren gegen 22 Uhr. Das ist von den drei
+Empfehlungen die guenstigste in der Umsetzung und die am schnellsten messbare.
+
+*Werbeaussage:* **"Impulse, wenn du ohnehin in Bewegung bist."**
+
+## Ergaenzende Empfehlungen
+
+**4. Die Bauform des Leaf zum Argument fuer die Bindung machen.** Die Tragequote
+ist die Obergrenze fuer jede weitere Funktion. Den Leaf als *"den Tracker, den du
+nicht ablegst"* vermarkten und Tag fuer Tag des **Tragens** belohnen statt
+erreichter Schritte.
+
+**5. Manuelles Erfassen abschaffen.** Die Gewichtserfassung erreichte
+`r percent(adopt$pct[3], 1)` der Nutzenden. Es ist davon auszugehen, dass jede
+Funktion mit Handeingabe scheitert. Vorrang haben die automatische
+Trinkmengen-Synchronisation von Spring und die Anbindung intelligenter Waagen.
+
+**6. Mitgliedschaftsinhalte auf die Wochenmitte legen.** Schlaf und Aktivitaet
+sinken beide zur Wochenmitte. Coaching-Inhalte fuer den Sonntagabend und den
+Dienstagmorgen einplanen.
+
+---
+
+# 7. Einschraenkungen und naechste Schritte
+
+```{r limitations}
+tibble(
+  Einschraenkung = c("Stichprobengroesse", "Angaben zum Geschlecht", "Alter der Daten",
+                     "Rekrutierung", "Kausalitaet", "Aggregation der Schlafdaten"),
+  Details = c(
+    paste0(n_users, " Teilnehmende, zu wenige fuer eine Verallgemeinerung auf einen Verbrauchermarkt"),
+    "Nicht erfasst, obwohl Bellabeat ausschliesslich an Frauen verkauft",
+    paste0("Erhoben von ", format(min(daily$date), "%m/%Y"), " bis ",
+           format(max(daily$date), "%m/%Y"), ", also neun Jahre alt"),
+    "Selbst ausgewaehlte MTurk-Freiwillige, vermutlich nicht deckungsgleich mit Bellabeats Kundinnen",
+    "Der Zusammenhang von Sitzzeit und Schlaf ist eine Assoziation; die Richtung ist ungeprueft",
+    "Die Maerz-Naechte beruhen auf der Annahme einer Grenze um 6 Uhr morgens"
+  )
+) |>  kable(caption = "Grenzen dieser Ergebnisse")
+```
+
+**Diese Ergebnisse sollten geprueft werden, bevor Budget gebunden wird.**
+Empfohlene naechste Schritte, nach Kosten geordnet:
+
+1. **A/B-Test zum Zeitpunkt der Benachrichtigungen** in den Fenstern von 12 bis
+   14 Uhr und 17 bis 19 Uhr. Am guenstigsten durchzufuehren und am schnellsten zu
+   bestaetigen oder zu widerlegen.
+2. **Diese Analyse an Bellabeats eigenen App-Telemetriedaten wiederholen**, wo
+   Geschlecht, Alter und Produktlinie bekannt sind. Das ist der zusaetzliche
+   Datensatz, den Sršen angeregt hat.
+3. **Das anpassungsfaehige Ziel gegen das feste Ziel von 10.000 Schritten
+   testen**, gemessen an der aktiven Nutzung ueber 30 Tage statt an der
+   Schrittzahl.
+4. **Abgewanderte Nutzende befragen**, warum das Geraet abgelegt wurde, um zu
+   bestaetigen, ob die Bauform tatsaechlich die bindende Grenze der Tragequote ist.
+
+---
+
+# Anhang
+
+## Hinweis zur Uebersetzung
+
+Dieses Dokument ist eine **maschinelle Uebersetzung** der englischen
+Originalfassung, angefertigt mit einem KI-Sprachmodell. Der Originalbericht wurde
+auf Englisch verfasst; die Analyse, der Code und alle Zahlen stammen aus dieser
+Originalfassung.
+
+Uebersetzt wurden ausschliesslich der Fliesstext, die Ueberschriften, die
+Tabellenbeschriftungen und die Diagrammtexte. Funktionsnamen, Variablennamen,
+Spaltennamen und Dateinamen bleiben auf Englisch, weil sie Bestandteil des Codes
+und des Datensatzes sind.
+
+Bei Abweichungen zwischen dieser Fassung und dem englischen Original ist das
+**englische Original massgeblich**. Diese Uebersetzung wurde nicht von einer
+muttersprachlichen Fachperson geprueft.
+
+```{r session info}
+sessionInfo()
+```

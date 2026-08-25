@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# Raw FitBit data — 604 MB, and several files exceed GitHub's limits.
+# GitHub blocks any file over 100 MB and warns above 50 MB. These are the
+# worst offenders:
+#     heartrate_seconds_merged.csv      86 MB / 40 MB
+#     minuteCaloriesNarrow_merged.csv   70 MB / 64 MB
+#     minuteMETsNarrow_merged.csv       50 MB / 46 MB
+#
+# The data is CC0 and one click away on Kaggle, so there is no reason to
+# commit it. The README tells people where to get it.
+#     https://www.kaggle.com/datasets/arashnic/fitbit
+# ---------------------------------------------------------------------------
+mturkfitbit_export_*/
+*.zip
+
+# If you DO want the small daily-level files tracked, delete the two lines
+# above and use these instead — they keep dailyActivity/sleepDay/weightLog
+# and drop only the huge minute- and second-level files:
+#
+# mturkfitbit_export_*/**/minute*.csv
+# mturkfitbit_export_*/**/heartrate_seconds_merged.csv
+
+# ---- R ---------------------------------------------------------------------
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# knitr / rmarkdown intermediates
+*_cache/
+*_files/
+*.knit.md
+*.utf8.md
+
+# ---- Python / Jupyter ------------------------------------------------------
+.ipynb_checkpoints/
+__pycache__/
+
+# ---- OS --------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini

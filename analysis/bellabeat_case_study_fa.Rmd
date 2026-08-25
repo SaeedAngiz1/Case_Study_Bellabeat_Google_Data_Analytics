@@ -1,0 +1,832 @@
+---
+title: "مطالعه موردی بلابیت"
+author: "محمد سعید انگیز"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 5, dpi = 110, fig.align = "center")
+```
+
+```{css, echo=FALSE}
+/* چیدمان راست‌به‌چپ برای متن فارسی. کد و خروجی کنسول چپ‌به‌راست می‌مانند. */
+body {
+  direction: rtl;
+  text-align: right;
+  font-family: Tahoma, "Segoe UI", "Iranian Sans", sans-serif;
+  line-height: 1.9;
+}
+h1, h2, h3, h4, h5, h6 { text-align: right; }
+pre, code, pre code, .sourceCode {
+  direction: ltr;
+  text-align: left;
+  font-family: Consolas, "Courier New", monospace;
+}
+table { direction: rtl; }
+th, td { text-align: right; }
+blockquote {
+  border-right: 4px solid #3E7C79;
+  border-left: none;
+  padding-right: 15px;
+  padding-left: 0;
+}
+ol, ul { padding-right: 25px; padding-left: 0; }
+caption { text-align: right; }
+#TOC { direction: rtl; text-align: right; }
+```
+
+```{r libraries}
+library(tidyverse)
+library(readr)
+library(ggplot2)
+library(tibble)
+library(lubridate)
+library(janitor)
+library(scales)
+library(knitr)
+library(dplyr)
+Sys.setlocale("LC_TIME", "C")  # نام روزهای هفته به انگلیسی، مستقل از تنظیمات سیستم
+```
+
+```{r fonts_and_days, include=FALSE}
+# فونت نمودارها. Tahoma حروف فارسی را درست به هم می‌چسباند.
+# روی ویندوز باید فونت ابتدا در پایگاه فونت R ثبت شود، وگرنه برای هر برچسب
+# هشدار «فونت پیدا نشد» صادر می‌شود و به فونت پیش‌فرض بازمی‌گردد.
+if (.Platform$OS.type == "windows") {
+  grDevices::windowsFonts(Tahoma = grDevices::windowsFont("Tahoma"))
+}
+FONT_FA <- "Tahoma"
+
+# برچسب روزهای هفته برای نمودارها. داده‌ها به ترتیب انگلیسی می‌مانند
+# (شنبه‌ی میلادی یعنی Sunday اول)، فقط نمایش ترجمه می‌شود.
+ROZHA <- c(Sunday = "یکشنبه", Monday = "دوشنبه", Tuesday = "سه‌شنبه",
+           Wednesday = "چهارشنبه", Thursday = "پنجشنبه",
+           Friday = "جمعه", Saturday = "شنبه")
+```
+
+```{r load and clean, include=FALSE}
+# ---- مسیرها -------------------------------------------------------------
+# منبع: https://www.kaggle.com/datasets/arashnic/fitbit
+# نکته: از اسلش رو به جلو استفاده کنید. در R نوشتن "C:\Users\..." خطاست،
+# چون \U و \F به عنوان دنباله فرار خوانده می‌شوند نه بک‌اسلش.
+BASE <- "C:/Users/angiz/Desktop/FitBit Fitness Tracker Data"
+P1 <- file.path(BASE, "mturkfitbit_export_3.12.16-4.11.16", "Fitabase Data 3.12.16-4.11.16")
+P2 <- file.path(BASE, "mturkfitbit_export_4.12.16-5.12.16", "Fitabase Data 4.12.16-5.12.16")
+
+# توقف زودهنگام با پیام خوانا به جای خطای مبهم read_csv
+stopifnot("پوشه داده پیدا نشد، مقدار BASE را بررسی کنید" = dir.exists(BASE))
+stopifnot("زیرپوشه‌های خروجی پیدا نشد. آیا فایل‌ها از حالت فشرده خارج شده‌اند؟" =
+            dir.exists(P1) && dir.exists(P2))
+
+# ---- فعالیت روزانه: هر دو دوره خروجی ------------------------------------
+daily_raw <- bind_rows(
+  read_csv(file.path(P1, "dailyActivity_merged.csv"), show_col_types = FALSE) |>
+    mutate(period = "۱۲ مارس تا ۱۱ آوریل"),
+  read_csv(file.path(P2, "dailyActivity_merged.csv"), show_col_types = FALSE) |>
+    mutate(period = "۱۲ آوریل تا ۱۲ مه")
+) |>  clean_names()
+
+daily <- daily_raw |>
+  mutate(date = mdy(activity_date)) |>
+  distinct(id, date, .keep_all = TRUE) |>
+  mutate(weekday     = wday(date, label = TRUE, abbr = FALSE),
+         is_wear_day = total_steps > 0)
+
+worn <- daily |>  filter(is_wear_day)
+
+# ---- خواب: جمع‌بندی شبانه آوریل به علاوه تجمیع دقیقه‌ای مارس -------------
+sleep_apr_raw <- read_csv(file.path(P2, "sleepDay_merged.csv"), show_col_types = FALSE) |>
+  clean_names()
+
+sleep_apr <- sleep_apr_raw |>
+  mutate(date = as_date(mdy_hms(sleep_day))) |>
+  distinct(id, date, .keep_all = TRUE) |>
+  transmute(id, date,
+            minutes_asleep = total_minutes_asleep,
+            time_in_bed    = total_time_in_bed)
+
+sleep_mar <- read_csv(file.path(P1, "minuteSleep_merged.csv"), show_col_types = FALSE) |>
+  clean_names() |>
+  distinct(id, date, .keep_all = TRUE) |>
+  mutate(ts = mdy_hms(date), sleep_date = as_date(ts - hours(6))) |>
+  group_by(id, date = sleep_date) |>
+  summarise(minutes_asleep = sum(value == 1), time_in_bed = n(), .groups = "drop") |>
+  filter(time_in_bed >= 60)
+
+sleep <- bind_rows(sleep_mar, sleep_apr) |>
+  distinct(id, date, .keep_all = TRUE) |>
+  mutate(hours_asleep     = minutes_asleep / 60,
+         awake_in_bed     = time_in_bed - minutes_asleep,
+         sleep_efficiency = minutes_asleep / time_in_bed)
+
+# ---- قدم‌های ساعتی و ثبت وزن --------------------------------------------
+hourly <- bind_rows(
+  read_csv(file.path(P1, "hourlySteps_merged.csv"), show_col_types = FALSE),
+  read_csv(file.path(P2, "hourlySteps_merged.csv"), show_col_types = FALSE)
+) |>  clean_names() |>
+  mutate(ts = mdy_hms(activity_hour), hour = hour(ts)) |>
+  distinct(id, ts, .keep_all = TRUE)
+
+weight <- bind_rows(
+  read_csv(file.path(P1, "weightLogInfo_merged.csv"), show_col_types = FALSE),
+  read_csv(file.path(P2, "weightLogInfo_merged.csv"), show_col_types = FALSE)
+) |>  clean_names() |>
+  mutate(date = as_date(mdy_hms(date))) |>
+  distinct(id, date, .keep_all = TRUE)
+
+# ---- ظاهر نمودارها ------------------------------------------------------
+TEAL <- "#3E7C79"; MINT <- "#7FC8A9"; CORAL <- "#E8836F"
+SAND <- "#F2C57C"; SLATE <- "#5C6B73"; GREY <- "#D9DEE0"
+
+theme_bb <- theme_minimal(base_size = 12) +
+  theme(text          = element_text(family = FONT_FA),
+        plot.title    = element_text(face = "bold", size = 14, family = FONT_FA),
+        plot.subtitle = element_text(colour = SLATE, size = 10, family = FONT_FA),
+        panel.grid.minor = element_blank())
+
+n_users <- n_distinct(daily$id)
+```
+
+# خلاصه مدیریتی
+
+دو ماه داده ردیاب فیت‌بیت از `r n_users` کاربر نشان می‌دهد که بازار سلامت و
+تندرستی عادت اشتباهی را می‌فروشد. قوی‌ترین رابطه در این داده‌ها میان قدم و سلامت
+نیست، بلکه میان **بی‌تحرکی و خواب بد** است.
+
+```{r headline stats}
+tibble(
+  `شاخص` = c("کاربران تحلیل‌شده", "روزهای دارای فعالیت ثبت‌شده", "شب‌های دارای داده خواب",
+             "میانه نرخ استفاده از دستگاه", "میانگین زمان بی‌تحرکی در روز",
+             "شب‌های کمتر از ۷ ساعت خواب", "روزهای رسیدن به ۱۰٬۰۰۰ قدم",
+             "همبستگی: زمان بی‌تحرکی و خواب"),
+  `مقدار` = c(
+    as.character(n_users),
+    comma(nrow(worn)),
+    comma(nrow(sleep)),
+    percent(median((worn |>  count(id, name = "d") |>
+      left_join(daily |>  distinct(id, period) |>
+        left_join(daily |>  group_by(period) |>
+          summarise(w = as.numeric(max(date) - min(date)) + 1, .groups = "drop"),
+          by = "period") |>  group_by(id) |>
+        summarise(w = sum(w), .groups = "drop"), by = "id") |>
+      mutate(r = d / w))$r), 1),
+    paste0(round(mean(worn$sedentary_minutes) / 60, 1), " ساعت"),
+    percent(mean(sleep$hours_asleep < 7), 0.1),
+    percent(mean(worn$total_steps >= 10000), 0.1),
+    round(cor((worn |>  inner_join(sleep, by = c("id", "date")))$sedentary_minutes,
+              (worn |>  inner_join(sleep, by = c("id", "date")))$hours_asleep), 2)
+  )
+) |>  kable(caption = "شاخص‌های کلیدی")
+```
+
+**سه توصیه اصلی:** هدف ثابت ۱۰٬۰۰۰ قدم با هدفی سازگارشونده جایگزین شود؛ اپلیکیشن
+بلابیت بر پایه پیوند «کمتر بنشین، بهتر بخواب» بازاریابی شود؛ و اعلان‌ها روی همان
+دو ساعتی تنظیم شوند که کاربران از پیش در حرکت‌اند.
+
+---
+
+# ۱. پرسیدن: خلاصه وظیفه کسب‌وکار
+
+> **خروجی ۱: خلاصه‌ای روشن از وظیفه کسب‌وکار**
+
+بلابیت سازنده محصولات فناورانه با محوریت سلامت برای زنان است که در سال ۲۰۱۳
+توسط اورشکا سرشن و ساندو مور بنیان گذاشته شد. خط محصول شامل اپلیکیشن بلابیت،
+ردیاب Leaf، ساعت Time، بطری آب Spring و عضویت اشتراکی است.
+
+اورشکا سرشن باور دارد که تحلیل داده‌های تناسب اندام دستگاه‌های هوشمند می‌تواند
+مسیرهای تازه‌ای برای رشد بگشاید. او از تیم تحلیل بازاریابی خواسته است داده‌های
+استفاده از **دستگاه‌های هوشمند غیر بلابیت** را تحلیل کند، **یک محصول بلابیت**
+را انتخاب کند و توصیه‌هایی در سطح کلان برای راهبرد بازاریابی ارائه دهد.
+
+### وظیفه کسب‌وکار
+
+> مشخص کردن اینکه مصرف‌کنندگان در عمل چگونه از دستگاه‌های هوشمند غیر بلابیت
+> استفاده می‌کنند، و تعیین اینکه بلابیت کدام یک از شکاف‌های رفتاری حاصل را
+> می‌تواند از راه بازاریابی اپلیکیشن خود پر کند.
+
+### پرسش‌های راهنما که این گزارش به آن‌ها پاسخ می‌دهد
+
+۱. چه روندهایی در استفاده از دستگاه‌های هوشمند دیده می‌شود؟
+۲. این روندها چگونه بر مشتریان بلابیت قابل تعمیم است؟
+۳. این روندها چگونه می‌تواند بر راهبرد بازاریابی بلابیت اثر بگذارد؟
+
+### ذی‌نفعان کلیدی
+
+| ذی‌نفع | نقش | آنچه از این گزارش نیاز دارد |
+|---|---|---|
+| اورشکا سرشن | هم‌بنیان‌گذار، مدیر ارشد خلاقیت | فرصت‌های رشد مبتنی بر شواهد |
+| ساندو مور | هم‌بنیان‌گذار، هیئت اجرایی | نتیجه‌گیری‌های تحلیلی معتبر |
+| تیم تحلیل بازاریابی | همکاران | مبنایی تکرارپذیر برای تصمیم‌های کمپین |
+
+### محصول انتخاب‌شده
+
+**اپلیکیشن بلابیت.** این اپلیکیشن همه دستگاه‌های خط محصول را به هم وصل می‌کند،
+همان سطحی است که انگیزه‌های رفتاری از آن ارائه می‌شود، و اشتراک عضویت را پیش
+می‌برد. بنابراین یافته‌های رفتاری در همین‌جا سریع‌تر و کم‌هزینه‌تر از هر جای
+دیگر قابل اجراست.
+
+---
+
+# ۲. آماده‌سازی: توصیف منابع داده
+
+> **خروجی ۲: توصیف همه منابع داده به‌کاررفته**
+
+## منبع و مجوز
+
+<a class="kaggle-btn" href="https://www.kaggle.com/datasets/arashnic/fitbit" target="_blank" rel="noopener">دریافت مجموعه داده از Kaggle</a>
+
+| مورد | توضیح |
+|---|---|
+| مجموعه داده | FitBit Fitness Tracker Data |
+| منتشرشده توسط | Mobius، از طریق [Kaggle](https://www.kaggle.com/datasets/arashnic/fitbit) |
+| مجوز | CC0، مالکیت عمومی، بدون محدودیت استفاده |
+| گردآوری | نظرسنجی Amazon Mechanical Turk، ۱۲ مارس تا ۱۲ مه ۲۰۱۶ |
+| رضایت | شرکت‌کنندگان صراحتاً به ارسال داده‌های ردیاب شخصی خود رضایت داده‌اند |
+| حریم خصوصی | بدون نام، نشانی یا اطلاعات جمعیتی؛ کاربران فقط با شناسه عددی مشخص شده‌اند |
+| ذخیره‌سازی | به‌صورت محلی در زیرپوشه‌های تاریخ‌دار نگهداری شد؛ فایل‌های اصلی تغییر نکردند |
+
+از آنجا که داده‌ها تحت مجوز CC0 هستند و هیچ شناسه شخصی ندارند، هیچ مانع حقوقی،
+حریم خصوصی یا امنیتی برای این تحلیل وجود ندارد. همه پاک‌سازی روی نسخه‌های کپی
+انجام شد و فایل‌های `.csv` اصلی هرگز بازنویسی نشدند.
+
+## ساختار داده‌ها
+
+مجموعه داده در قالب **دو پوشه خروجی برای دو ماه پیاپی** ارائه می‌شود:
+
+- `mturkfitbit_export_3.12.16-4.11.16`، ۱۲ مارس تا ۱۱ آوریل ۲۰۱۶
+- `mturkfitbit_export_4.12.16-5.12.16`، ۱۲ آوریل تا ۱۲ مه ۲۰۱۶
+
+هر دو پوشه همان اندازه‌گیری‌ها را در چهار سطح جزئیات دارند: روزانه، ساعتی،
+دقیقه‌ای و ثانیه‌ای، در قالب بلند (`Narrow`) و عریض.
+
+**بیشتر تحلیل‌های منتشرشده از این مجموعه داده تنها از پوشه دوم استفاده
+می‌کنند.** هر دو پوشه در فایل `dailyActivity_merged.csv` ساختار یکسانی دارند،
+بنابراین این تحلیل هر دو را با هم ترکیب می‌کند:
+
+```{r Scope Comparison}
+tibble(
+  `دامنه` = c("تحلیل رایج با یک پوشه", "این تحلیل (هر دو پوشه)"),
+  `کاربران` = c(33, n_users),
+  `روزهای پوشش‌داده‌شده` = c(31, as.numeric(max(daily$date) - min(daily$date)) + 1),
+  `شب‌های دارای داده خواب` = c(410, nrow(sleep))
+) |>  kable(caption = "ترکیب هر دو پوشه خروجی، پایه شواهد را تقریباً دو برابر می‌کند")
+```
+
+## فایل‌های انتخاب‌شده و دلیل آن
+
+از ۱۸ فایل موجود، شش فایل بار تحلیل را بر دوش می‌کشند. فایل‌های
+`dailySteps_merged.csv`، `dailyCalories_merged.csv` و
+`dailyIntensities_merged.csv` کنار گذاشته شدند، چون ستون‌هایی را تکرار می‌کنند
+که پیش‌تر در `dailyActivity_merged.csv` وجود دارد. این موضوع بررسی شد، نه فرض:
+
+```{r Redundancy check}
+steps_only <- read_csv(file.path(P2, "dailySteps_merged.csv"), show_col_types = FALSE)
+activity   <- read_csv(file.path(P2, "dailyActivity_merged.csv"), show_col_types = FALSE)
+
+check <- steps_only |>  rename(day = ActivityDay) |>
+  inner_join(activity |>  rename(day = ActivityDate), by = c("Id", "day"))
+
+cat("روزهای کاربری مقایسه‌شده:", nrow(check), "\n")
+cat("شمار قدم‌ها در همه سطرها یکسان است:", all(check$StepTotal == check$TotalSteps), "\n")
+```
+
+| فایل استفاده‌شده | کاربرد |
+|---|---|
+| `dailyActivity_merged` | قدم، مسافت، دقایق شدت فعالیت و کالری در هر روز |
+| `hourlySteps_merged` | الگوی فعالیت در ساعت‌های شبانه‌روز |
+| `sleepDay_merged` | مجموع خواب شبانه، دوره آوریل |
+| `minuteSleep_merged` | تجمیع‌شده به شب، برای گسترش پوشش خواب به مارس |
+| `weightLogInfo_merged` | میزان استفاده از قابلیت‌ها و رفتار ثبت دستی |
+
+فایل `heartrate_seconds_merged.csv` کنار گذاشته شد: ۸۶ مگابایت حجم برای تنها ۱۴
+کاربر از `r n_users` کاربر، که زیرنمونه‌ای بسیار کوچک برای پشتیبانی از یک یافته
+است. فایل‌های فعالیت دقیقه‌ای نیز به دلیل هم‌پوشانی با تجمیع‌های ساعتی و روزانه
+کنار گذاشته شدند.
+
+## درستی و اعتبار داده: آیا معیار ROCCC را برآورده می‌کند؟
+
+```{r ROCCC}
+tibble(
+  `معیار` = c("Reliable (قابل اتکا)", "Original (اصیل)", "Comprehensive (جامع)",
+              "Current (به‌روز)", "Cited (مستند)"),
+  `ارزیابی` = c("ضعیف", "ضعیف", "ضعیف", "نامناسب", "خوب"),
+  `توضیح` = c(
+    paste0(n_users, " شرکت‌کننده خودانتخاب؛ بدون راستی‌آزمایی مستقل"),
+    "بازنشر توسط شخص ثالث، نه گردآوری‌شده توسط فیت‌بیت یا بلابیت",
+    "نه سن، نه جنسیت، نه قد، نه موقعیت مکانی و نه وضعیت پایه سلامت ثبت شده است",
+    "گردآوری در ۲۰۱۶؛ سخت‌افزار پوشیدنی و انتظار کاربران از آن زمان تغییر کرده است",
+    "به‌روشنی مستند و با مجوز آزاد CC0 منتشر شده است"
+  )
+) |>  kable(caption = "ارزیابی ROCCC برای مجموعه داده FitBit Fitness Tracker")
+```
+
+**این مجموعه داده معیار ROCCC را خوب برآورده نمی‌کند، و این نکته پیش از ارائه
+یافته‌ها بیان می‌شود، نه پس از آن.** نمونه کوچک و خودانتخاب است و **فیلد جنسیت
+ندارد**؛ این محدودیتی جدی است وقتی تحلیل برای شرکتی انجام می‌شود که منحصراً به
+زنان می‌فروشد. هر یافته زیر یک نشانه جهت‌دار است که باید در برابر داده‌های خود
+بلابیت راستی‌آزمایی شود، نه نتیجه‌ای که بتوان بودجه‌ای بر آن بست.
+
+سرشن پیشنهاد کرده بود مجموعه داده دیگری برای رفع این محدودیت‌ها در نظر گرفته
+شود. ارزشمندترین افزوده، داده‌های تله‌متری خود اپلیکیشن بلابیت است، جایی که
+جنسیت، سن و خط محصول مشخص است.
+
+---
+
+# ۳. پردازش: مستندسازی پاک‌سازی داده
+
+> **خروجی ۳: مستندسازی هرگونه پاک‌سازی یا دستکاری داده**
+
+## ابزارهای انتخاب‌شده
+
+**R به همراه tidyverse**، به سه دلیل: مجموعه داده در سطح دقیقه از محدوده کار
+راحت اکسل فراتر می‌رود (بیش از ۱٫۳ میلیون سطر)؛ هر گام پاک‌سازی به شکل کد ثبت
+می‌شود و در نتیجه تکرارپذیر و قابل بازبینی است؛ و یک محیط واحد پاک‌سازی، آمار و
+تصویرسازی را بدون نیاز به انتقال میان ابزارها انجام می‌دهد. این سند با R Markdown
+نوشته شده است، بنابراین هر عددی که نقل می‌شود هنگام تولید سند محاسبه می‌شود و
+دستی تایپ نشده است.
+
+## بررسی خطاها
+
+```{r Integrity checks}
+tibble(
+  `بررسی` = c("سطرهای تکراری در فعالیت روزانه",
+              "سطرهای تکراری در خواب (جمع‌بندی آوریل)",
+              "مقادیر جاافتاده در فعالیت روزانه",
+              "روزهای با صفر قدم ثبت‌شده",
+              "ثبت‌های وزن بدون مقدار چربی بدن"),
+  `نتیجه` = c(
+    sum(duplicated(daily_raw)),
+    sum(duplicated(sleep_apr_raw)),
+    sum(is.na(daily_raw)),
+    sum(!daily$is_wear_day),
+    sum(is.na(weight$fat))
+  )
+) |>  kable(caption = "بررسی‌های درستی داده پیش از هر تحلیل")
+```
+
+## گام‌های پاک‌سازی انجام‌شده
+
+۱. **ترکیب هر دو پوشه خروجی** برای فعالیت روزانه، قدم‌های ساعتی و وزن، پس از
+   تأیید یکسان بودن ساختارها. ستون `period` نگه می‌دارد که هر سطر از کدام دوره
+   آمده است.
+۲. **یکسان‌سازی نام ستون‌ها** به شکل `snake_case` با `janitor::clean_names()`.
+۳. **تبدیل تاریخ از متن.** تابع `read_csv()` مقدار `"4/12/2016"` را به صورت
+   رشته متنی وارد می‌کند؛ `lubridate::mdy()` و `mdy_hms()` آن را به شیء تاریخ
+   تبدیل می‌کنند تا بتوان مرتب کرد، فیلتر گرفت و بر پایه روز هفته گروه‌بندی کرد.
+۴. **حذف رکوردهای تکراری.** فایل `sleepDay_merged.csv` سه سطر کاملاً یکسان دارد
+   که نقصی مستند در این مجموعه داده است. حذف تکرار بر پایه `id` و `date` روی هر
+   جدول اعمال شد، به عنوان محافظتی در مرز میان دو پوشه.
+۵. **جداسازی روزهای بدون استفاده از دستگاه.**
+۶. **تجمیع داده خواب دقیقه‌ای مارس به مجموع شبانه.**
+۷. **فیلدهای مشتق‌شده:** روز هفته، مجموع دقایق فعال، ساعت‌های خواب، دقایق بیداری
+   در رختخواب، بازدهی خواب و نرخ استفاده از دستگاه به تفکیک کاربر.
+
+## برخورد با روزهای بدون استفاده
+
+`r sum(!daily$is_wear_day)` سطر صفر قدم ثبت کرده‌اند، در کنار چیزی نزدیک به یک
+روز کامل دقایق بی‌تحرکی. این‌ها نشانه دستگاهی هستند که روی شارژ رها شده، نه
+شرکت‌کننده‌ای که ۲۴ ساعت بی‌حرکت مانده باشد:
+
+```{r non wear profile}
+daily |>
+  group_by(`نوع روز` = ifelse(is_wear_day, "دستگاه استفاده شده", "صفر قدم ثبت شده")) |>
+  summarise(`روزها` = n(),
+            `میانگین دقایق بی‌تحرکی` = round(mean(sedentary_minutes)),
+            `میانگین کالری` = round(mean(calories)), .groups = "drop") |>
+  kable(caption = "روزهای صفر قدم به‌طور میانگین نزدیک به ۱۴۴۰ دقیقه بی‌تحرکی دارند، که تأیید می‌کند دستگاه استفاده نشده است")
+```
+
+این سطرها **از همه میانگین‌های فعالیت کنار گذاشته شدند** اما **برای تحلیل میزان
+استفاده از دستگاه نگه داشته شدند**، جایی که همین سطرها شاهد مستقیم آن‌اند که
+ردیاب هر چند وقت یک‌بار استفاده می‌شود. وارد کردن آن‌ها در میانگین‌ها، فعالیت را
+حدود ۱۰ درصد کمتر از واقع نشان می‌داد.
+
+## گسترش پوشش خواب به ماه مارس
+
+فایل `sleepDay_merged.csv` تنها در پوشه آوریل وجود دارد. استفاده تنها از آن یعنی
+فعالیت از هر دو ماه گرفته شود اما خواب فقط از یک ماه. فایل
+`minuteSleep_merged.csv` ماه مارس را در سطح دقیقه پوشش می‌دهد، جایی که `value`
+با ۱ برابر خواب، ۲ برابر بی‌قراری و ۳ برابر بیداری کدگذاری شده و هر سطر معادل
+یک دقیقه در رختخواب است. شمردن سطرها در هر شب زمان حضور در رختخواب را می‌دهد و
+شمردن `value == 1` دقایق خواب را. این دقیقاً همان دو معیاری است که فایل آوریل
+گزارش می‌کند.
+
+**فرض اعلام‌شده:** خواب از نیمه‌شب عبور می‌کند، پس گروه‌بندی بر پایه تاریخ
+تقویمی یک شب را به دو رکورد می‌شکند. کم کردن شش ساعت پیش از گرفتن تاریخ، دقایق
+پیش از سپیده‌دم را به شب قبل نسبت می‌دهد. رکوردهای کمتر از ۶۰ دقیقه به عنوان
+تکه‌های ناقص کنار گذاشته شدند، نه به عنوان یک شب. این مرز ساعت ۶ بامداد یک
+تصمیم اجتهادی است. کنار گذاشتن کامل مارس پایه شواهد را از `r nrow(sleep)` شب به
+۴۱۰ شب کاهش می‌دهد، بدون آنکه جهت یا معنای هیچ یافته‌ای تغییر کند.
+
+## راستی‌آزمایی داده پاک‌شده
+
+```{r Verify clean}
+tibble(
+  `جدول` = c("فعالیت روزانه (روزهای استفاده)", "خواب", "قدم‌های ساعتی", "ثبت‌های وزن"),
+  `سطرها` = c(nrow(worn), nrow(sleep), nrow(hourly), nrow(weight)),
+  `کاربران` = c(n_distinct(worn$id), n_distinct(sleep$id),
+                n_distinct(hourly$id), n_distinct(weight$id)),
+  `بازه زمانی` = c(
+    paste(format(min(worn$date), "%Y/%m/%d"), "تا", format(max(worn$date), "%Y/%m/%d")),
+    paste(format(min(sleep$date), "%Y/%m/%d"), "تا", format(max(sleep$date), "%Y/%m/%d")),
+    paste(format(min(as_date(hourly$ts)), "%Y/%m/%d"), "تا", format(max(as_date(hourly$ts)), "%Y/%m/%d")),
+    paste(format(min(weight$date), "%Y/%m/%d"), "تا", format(max(weight$date), "%Y/%m/%d"))
+  )
+) |>  kable(caption = "جدول‌های پاک‌شده، آماده برای تحلیل")
+```
+
+---
+
+# ۴. تحلیل: خلاصه تحلیل
+
+> **خروجی ۴: خلاصه‌ای از تحلیل**
+
+تحلیل در چهار مرحله پیش رفت. **آمار توصیفی** سطح پایه فعالیت، خواب و کالری را در
+مقایسه با معیارهای منتشرشده سلامت مشخص کرد. **بخش‌بندی در سطح کاربر**
+شرکت‌کنندگان را بر پایه میانگین قدم روزانه و نرخ استفاده از دستگاه گروه‌بندی
+کرد، و همیشه ابتدا در سطح هر کاربر تجمیع شد و سپس کاربران با هم مقایسه شدند تا
+شرکت‌کنندگانی با روزهای ثبت‌شده بیشتر بر میانگین‌ها غالب نشوند. **تجمیع زمانی**
+فعالیت را بر پایه ساعت شبانه‌روز و روز هفته بررسی کرد. **همبستگی و رگرسیون**
+رابطه میان قدم، کالری، زمان بی‌تحرکی و مدت خواب را آزمود.
+
+`غافلگیری اصلی:` متغیری که بیشترین ارتباط را با خواب دارد شمار قدم نیست، بلکه
+**زمان بی‌تحرکی** است، و این رابطه تقریباً سه برابر قوی‌تر است. این موضوع پیام
+بازاریابی را از تشویق به ورزش به کاهش نشستن تغییر می‌دهد؛ سدی به‌مراتب کوتاه‌تر
+برای کاربر، و ادعایی که در حال حاضر هیچ رقیب بزرگی مطرح نمی‌کند.
+
+```{r analysis Summary}
+sa <- worn |> inner_join(sleep, by = c("id", "date"))
+
+tibble(
+  `رابطه` = c("قدم روزانه و کالری سوخته",
+              "دقایق بی‌تحرکی و کالری سوخته",
+              "قدم روزانه و ساعت‌های خواب",
+              "دقایق بی‌تحرکی و ساعت‌های خواب"),
+  `ضریب پیرسون r` = c(
+    round(cor(worn$total_steps, worn$calories), 3),
+    round(cor(worn$sedentary_minutes, worn$calories), 3),
+    round(cor(sa$total_steps, sa$hours_asleep), 3),
+    round(cor(sa$sedentary_minutes, sa$hours_asleep), 3)
+  ),
+  n = c(nrow(worn), nrow(worn), nrow(sa), nrow(sa))
+) |>  kable(caption = "همبستگی‌های آزموده‌شده. تنها ارتباط؛ جهت علّی آزموده نشده است.")
+```
+
+---
+
+# ۵. اشتراک‌گذاری: تصویرسازی‌ها و یافته‌های کلیدی
+
+> **خروجی ۵: تصویرسازی‌های پشتیبان و یافته‌های کلیدی**
+
+## یافته ۱: دستگاه از دست درمی‌آید، و این زیاد اتفاق می‌افتد
+
+```{r finding 1}
+period_len <- daily |>  group_by(period) |>
+  summarise(days = as.numeric(max(date) - min(date)) + 1, .groups = "drop")
+
+user_window <- daily |>  distinct(id, period) |>
+  left_join(period_len, by = "period") |>
+  group_by(id) |>  summarise(window_days = sum(days), .groups = "drop")
+
+usage <- worn |>  count(id, name = "wear_days") |>
+  left_join(user_window, by = "id") |>
+  mutate(wear_rate = wear_days / window_days,
+         segment = case_when(wear_rate >= 0.80 ~ "استفاده زیاد (۸۰ تا ۱۰۰٪)",
+                             wear_rate >= 0.50 ~ "استفاده متوسط (۵۰ تا ۷۹٪)",
+                             TRUE              ~ "استفاده کم (کمتر از ۵۰٪)") |>
+           factor(levels = c("استفاده زیاد (۸۰ تا ۱۰۰٪)", "استفاده متوسط (۵۰ تا ۷۹٪)",
+                             "استفاده کم (کمتر از ۵۰٪)")))
+
+usage_sum <- usage |>  count(segment, .drop = FALSE) |>  mutate(pct = n / sum(n))
+
+ggplot(usage_sum, aes(reorder(segment, n), n, fill = segment)) +
+  geom_col(width = .62) +
+  geom_text(aes(label = paste0(n, " کاربر (", percent(pct, 1), ")")),
+            hjust = -0.08, size = 3.8, colour = SLATE, family = FONT_FA) +
+  coord_flip() + scale_y_continuous(expand = expansion(c(0, .3))) +
+  scale_fill_manual(values = c(TEAL, MINT, CORAL), guide = "none") +
+  labs(title = paste0("کاربر میانه ردیاب را تنها در ",
+                      percent(median(usage$wear_rate), 1), " روزها استفاده کرده است"),
+       subtitle = "روزهای دارای قدم ثبت‌شده، به نسبت دوره خروجی هر کاربر",
+       x = NULL, y = "شمار کاربران") + theme_bb
+```
+
+کاربر میانه در `r percent(median(usage$wear_rate), 1)` روزهای در دسترس قدم ثبت
+کرده است. **هیچ شرکت‌کننده‌ای** دستگاه را در `۸۰٪` یا بیشتر از روزها استفاده
+نکرده، و `r usage_sum$n[usage_sum$segment == "استفاده کم (کمتر از ۵۰٪)"]` کاربر
+کمتر از نیمی از روزها آن را استفاده کرده‌اند.
+
+**چرا اهمیت دارد:** ردیابی که یک‌سوم عمرش را در کشو می‌گذراند نمی‌تواند درباره
+خواب، استرس یا چرخه قاعدگی بینشی قابل اتکا بدهد. میزان استفاده، سقف محدودکننده
+هر قابلیت دیگری است.
+
+## یافته ۲: هدف ۱۰٬۰۰۰ قدم یک دیوار است، نه یک هدف
+
+```{r finding 2}
+user_avg <- worn |>  group_by(id) |>
+  summarise(avg_steps = mean(total_steps), .groups = "drop") |>
+  mutate(level = case_when(avg_steps < 5000  ~ "کم‌تحرک (زیر ۵ هزار)",
+                           avg_steps < 7500  ~ "فعالیت کم (۵ تا ۷٫۵ هزار)",
+                           avg_steps < 10000 ~ "فعالیت متوسط (۷٫۵ تا ۱۰ هزار)",
+                           TRUE              ~ "فعال (بالای ۱۰ هزار)") |>
+           factor(levels = c("کم‌تحرک (زیر ۵ هزار)", "فعالیت کم (۵ تا ۷٫۵ هزار)",
+                             "فعالیت متوسط (۷٫۵ تا ۱۰ هزار)", "فعال (بالای ۱۰ هزار)")))
+
+lvl <- user_avg |>  count(level, .drop = FALSE) |>  mutate(pct = n / sum(n))
+
+ggplot(lvl, aes(level, n, fill = level)) +
+  geom_col(width = .62) +
+  geom_text(aes(label = paste0(n, "\n", percent(pct, 1))),
+            vjust = -0.25, size = 3.6, colour = SLATE, family = FONT_FA) +
+  scale_y_continuous(expand = expansion(c(0, .25))) +
+  scale_fill_manual(values = c(CORAL, SAND, MINT, TEAL), guide = "none") +
+  labs(title = paste0(sum(lvl$n[1:2]), " کاربر از ", sum(lvl$n),
+                      " کاربر به‌طور میانگین زیر ۷۵۰۰ قدم در روز دارند"),
+       subtitle = "کاربران بر پایه میانگین قدم روزانه خودشان گروه‌بندی شده‌اند",
+       x = NULL, y = "شمار کاربران") + theme_bb
+```
+
+میانگین قدم روزانه `r comma(mean(worn$total_steps), 1)` و میانه
+`r comma(median(worn$total_steps), 1)` بود. تنها
+`r percent(mean(worn$total_steps >= 10000), 0.1)` روزها به ۱۰٬۰۰۰ قدم رسیدند.
+
+```{r finding 2 weekday}
+worn |>  group_by(weekday) |>
+  summarise(avg_steps = mean(total_steps), .groups = "drop") |>
+  ggplot(aes(weekday, avg_steps, fill = avg_steps)) +
+  geom_col(width = .68) +
+  geom_hline(yintercept = 10000, linetype = "dashed", colour = CORAL, linewidth = .7) +
+  annotate("text", x = 1, y = 10400, label = "هدف ۱۰٬۰۰۰ قدم",
+           colour = CORAL, size = 3.2, hjust = 0, family = FONT_FA) +
+  scale_x_discrete(labels = ROZHA) +
+  scale_fill_gradient(low = MINT, high = TEAL, guide = "none") +
+  scale_y_continuous(labels = comma, expand = expansion(c(0, .12))) +
+  labs(title = "هیچ روزی از هفته به‌طور میانگین به هدف ۱۰٬۰۰۰ قدم نمی‌رسد",
+       subtitle = "یکشنبه کم‌تحرک‌ترین روز است", x = NULL, y = "میانگین قدم") +
+  theme_bb
+```
+
+**چرا اهمیت دارد:** برای نیمی از کاربران، هدف پیش‌فرض دست‌نیافتنی است. هدفی که
+هر روز از دست می‌رود دیگر انگیزه نمی‌سازد و به یادآور شکست بدل می‌شود.
+
+## یافته ۳: مسئله نشستن است، نه ورزش نکردن
+
+```{r finding-3, fig.height=3.6}
+mins <- worn |>
+  summarise(`بی‌تحرک` = mean(sedentary_minutes), `سبک` = mean(lightly_active_minutes),
+            `متوسط` = mean(fairly_active_minutes), `شدید` = mean(very_active_minutes)) |>
+  pivot_longer(everything(), names_to = "intensity", values_to = "minutes") |>
+  mutate(pct = minutes / sum(minutes),
+         intensity = factor(intensity, levels = c("بی‌تحرک", "سبک", "متوسط", "شدید")))
+
+ggplot(mins, aes("", minutes, fill = intensity)) +
+  geom_col(width = .55) +
+  geom_text(aes(label = ifelse(pct > .03, paste0(intensity, "\n", round(minutes), " دقیقه"), "")),
+            position = position_stack(vjust = .5), size = 3.6,
+            colour = "white", fontface = "bold", family = FONT_FA) +
+  coord_flip() + scale_fill_manual(values = c(SLATE, MINT, SAND, CORAL)) +
+  labs(title = paste0(percent(mins$pct[mins$intensity == "بی‌تحرک"], 1),
+                      " از زمان ثبت‌شده بی‌تحرکی است"),
+       subtitle = "میانگین دقیقه در هر روز استفاده، به تفکیک شدت فعالیت",
+       x = NULL, y = "دقیقه", fill = NULL) +
+  theme_bb + theme(axis.text.y = element_blank())
+```
+
+کاربران به‌طور میانگین `r round(mean(worn$sedentary_minutes) / 60, 1)` ساعت
+بی‌تحرکی در هر روز ثبت‌شده داشته‌اند، در برابر
+`r round(mean(worn$very_active_minutes), 1)` دقیقه فعالیت شدید. در
+`r percent(mean((worn$fairly_active_minutes + worn$very_active_minutes) < 30), 0.1)`
+روزها، مجموع زمان فعالیت متوسط و شدید زیر ۳۰ دقیقه بوده است.
+
+```{r finding 3 Scatter}
+ct <- cor.test(worn$total_steps, worn$calories)
+m  <- lm(calories ~ total_steps, data = worn)
+
+ggplot(worn, aes(total_steps, calories)) +
+  geom_point(alpha = .28, colour = TEAL, size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, colour = CORAL, fill = SAND) +
+  scale_x_continuous(labels = comma) + scale_y_continuous(labels = comma) +
+  labs(title = "قدم بیشتر یعنی کالری سوخته بیشتر، اما بازدهی آن اندک است",
+       subtitle = paste0("r = ", round(ct$estimate, 2), "، حدود ",
+                         round(coef(m)[2] * 1000), " کالری به ازای هر ۱۰۰۰ قدم اضافه"),
+       x = "قدم روزانه", y = "کالری سوخته") + theme_bb
+```
+
+**چرا اهمیت دارد:** فرصت قابل هدف‌گیری همان
+`r round(mean(worn$sedentary_minutes) / 60, 1)` ساعت بی‌تحرکی است، نه
+`r round(mean(worn$very_active_minutes))` دقیقه فعال. شکستن دوره‌های نشستن برای
+کاربر سدی به‌مراتب کوتاه‌تر از افزودن جلسات تمرین است.
+
+## یافته ۴: فعالیت در دو اوج قابل پیش‌بینی متمرکز می‌شود
+
+```{r finding 4}
+by_hour <- hourly |>  group_by(hour) |>
+  summarise(avg_steps = mean(step_total), .groups = "drop")
+
+ggplot(by_hour |>  mutate(peak = hour %in% c(12, 13, 17, 18, 19)),
+       aes(factor(hour), avg_steps, fill = peak)) +
+  geom_col(width = .78) +
+  scale_fill_manual(values = c(`FALSE` = GREY, `TRUE` = TEAL), guide = "none") +
+  labs(title = "فعالیت در وقت ناهار و دوباره از ساعت ۱۷ تا ۱۹ به اوج می‌رسد",
+       subtitle = "میانگین قدم در هر ساعت شبانه‌روز، برای همه کاربران",
+       x = "ساعت شبانه‌روز", y = "میانگین قدم") + theme_bb
+```
+
+```{r finding 4 Table}
+by_hour |>  arrange(desc(avg_steps)) |>  head(5) |>
+  transmute(`ساعت` = paste0(hour, ":00"), `میانگین قدم` = round(avg_steps)) |>
+  kable(caption = "پنج ساعت پرتحرک شبانه‌روز")
+```
+
+**چرا اهمیت دارد:** زمان‌بندی اعلان‌ها در بیشتر اپلیکیشن‌ها حدس و گمان است. در
+این بازه‌ها کاربران از پیش در حرکت‌اند و بیشترین پذیرش را نسبت به یک یادآوری
+دارند.
+
+## یافته ۵: نیمی از شب‌ها به خواب سالم نمی‌رسد
+
+```{r finding-5}
+ggplot(sleep, aes(hours_asleep)) +
+  geom_histogram(binwidth = .5, fill = TEAL, colour = "white") +
+  geom_vline(xintercept = 7, linetype = "dashed", colour = CORAL, linewidth = .8) +
+  annotate("text", x = 7.12, y = Inf, vjust = 2, hjust = 0, colour = CORAL, size = 3.4,
+           label = "۷ ساعت = کمینه توصیه‌شده", family = FONT_FA) +
+  labs(title = paste0(percent(mean(sleep$hours_asleep < 7), 1),
+                      " از شب‌ها زیر ۷ ساعت خواب دارند"),
+       subtitle = paste0(nrow(sleep), " شب از ", n_distinct(sleep$id), " کاربر"),
+       x = "ساعت خواب", y = "شمار شب‌ها") + theme_bb
+```
+
+میانگین خواب `r round(mean(sleep$hours_asleep), 2)` ساعت بود، با میانگین
+`r round(mean(sleep$awake_in_bed), 1)` دقیقه بیداری در رختخواب.
+
+```{r finding 5 key}
+ggplot(sa, aes(sedentary_minutes, hours_asleep)) +
+  geom_point(alpha = .3, colour = TEAL, size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, colour = CORAL, fill = SAND) +
+  geom_hline(yintercept = 7, linetype = "dotted", colour = SLATE) +
+  labs(title = "هرچه روز بی‌تحرک‌تر، خواب آن شب کمتر",
+       subtitle = paste0("r = ", round(cor(sa$sedentary_minutes, sa$hours_asleep), 2),
+                         " در ", nrow(sa), " روز کاربری تطبیق‌یافته"),
+       x = "دقایق بی‌تحرکی", y = "ساعت خواب") + theme_bb
+```
+
+**چرا اهمیت دارد:** این عملی‌ترین رابطه در کل مجموعه داده است. پیام «بیشتر راه
+برو، بهتر بخواب» نیست، بلکه **«کمتر بنشین، بهتر بخواب»** است؛ ادعایی مشخص، قابل
+دفاع و متمایز.
+
+## یافته ۶: پذیرش فرو می‌ریزد وقتی تلاش لازم می‌شود
+
+```{r finding 6}
+adopt <- tibble(
+  feature = c("فعالیت (خودکار)", "خواب (استفاده شبانه)", "وزن (ثبت دستی)"),
+  users   = c(n_distinct(daily$id), n_distinct(sleep$id), n_distinct(weight$id))
+) |>  mutate(pct = users / n_users)
+
+ggplot(adopt, aes(reorder(feature, pct), pct, fill = feature)) +
+  geom_col(width = .6) +
+  geom_text(aes(label = paste0(users, " کاربر (", percent(pct, 1), ")")),
+            hjust = -0.08, size = 3.8, colour = SLATE, family = FONT_FA) +
+  coord_flip() +
+  scale_y_continuous(labels = percent, limits = c(0, 1.3), expand = c(0, 0)) +
+  scale_fill_manual(values = c(TEAL, SAND, CORAL), guide = "none") +
+  labs(title = "ثبت داده به‌شدت افت می‌کند وقتی ورود دستی لازم است",
+       subtitle = "نسبت کاربرانی که دست‌کم یک‌بار هر نوع داده را ثبت کرده‌اند",
+       x = NULL, y = "نسبت کاربران") + theme_bb
+```
+
+`r percent(mean(weight$is_manual_report == TRUE, na.rm = TRUE), 0.1)` از ثبت‌های
+وزن با دست تایپ شده‌اند، با میانه `r median(count(weight, id)$n)` ثبت برای هر
+کاربر ثبت‌کننده در کل بازه.
+
+**چرا اهمیت دارد:** هر لایه اضافه از دشواری، تقریباً یک‌سوم کاربران را از دست
+می‌دهد. قابلیت‌هایی که ورود دستی می‌خواهند، صرف‌نظر از کیفیت طراحی، پذیرفته
+نمی‌شوند.
+
+---
+
+# ۶. اقدام: توصیه‌ها
+
+> **خروجی ۶: مهم‌ترین توصیه‌های محتوایی در سطح کلان**
+
+## پاسخ به سه پرسش راهنما
+
+**۱. چه روندهایی در استفاده از دستگاه‌های هوشمند دیده می‌شود؟**
+دستگاه‌ها به‌طور نامنظم استفاده می‌شوند، با میانه
+`r percent(median(usage$wear_rate), 1)` روزها، و هیچ کاربری از `۸۰٪` فراتر
+نمی‌رود. فعالیت به‌روشنی کمتر از اهداف سلامت عمومی است: تنها
+`r percent(mean(worn$total_steps >= 10000), 0.1)` روزها به ۱۰٬۰۰۰ قدم می‌رسد، و
+`r round(mean(worn$sedentary_minutes) / 60, 1)` ساعت از روز ثبت‌شده میانگین،
+بی‌تحرکی است. فعالیت حول وقت ناهار و اوایل شب متمرکز می‌شود. خواب کوتاه است،
+`r percent(mean(sleep$hours_asleep < 7), 0.1)` شب‌ها زیر هفت ساعت است، و پذیرش
+قابلیت‌ها هرجا ورود دستی لازم باشد به‌شدت افت می‌کند.
+
+**۲. این روندها چگونه بر مشتریان بلابیت قابل تعمیم است؟**
+مشتریان بلابیت از همان دسته دستگاه‌ها برای همان مقاصد استفاده می‌کنند، پس همان
+سقف‌های رفتاری برقرار است. دو مورد مستقیم‌تر منتقل می‌شود. نخست، نرخ استفاده
+سقف همه چیز است: قابلیت‌های بلابیت در زمینه استرس، خواب و چرخه قاعدگی به استفاده
+پیوسته وابسته‌اند، پس فرم جواهرگونه Leaf یک محدودیت واقعی را هدف می‌گیرد، نه یک
+مسئله ظاهری. دوم، پیوند میان بی‌تحرکی و خواب دقیقاً با جایگاه‌یابی موجود بلابیت
+حول تندرستی کل‌نگر، در برابر عملکرد ورزشی، هم‌راستاست.
+
+**۳. این روندها چگونه می‌تواند بر راهبرد بازاریابی بلابیت اثر بگذارد؟**
+پیام را از عملکرد به دست‌یافتنی بودن جابه‌جا می‌کنند. به‌جای رقابت با فیت‌بیت و
+اپل بر سر شمار قدم و ثبت تمرین، جایی که داده‌ها نشان می‌دهد بیشتر کاربران ناکام
+می‌مانند، بلابیت می‌تواند ادعای کم‌ارتفاع‌تر، دست‌یافتنی‌تر و بهتر مستندشده
+«کمتر نشستن برای بهتر خوابیدن» را از آنِ خود کند.
+
+## سه توصیه اصلی
+
+### ۱. جایگزینی هدف ثابت قدم با هدفی سازگارشونده
+
+تنها `r percent(mean(worn$total_steps >= 10000), 0.1)` روزها به ۱۰٬۰۰۰ قدم
+می‌رسد و `r sum(lvl$n[1:2])` کاربر از `r n_users` کاربر به‌طور میانگین زیر ۷۵۰۰
+قدم دارند. هدف اولیه هر کاربر از خط پایه هفته نخست خودش تعیین و به‌تدریج بالا
+برده شود.
+
+*پیام تبلیغاتی:* **«هدفی که همان‌جا که هستی به سراغت می‌آید.»**
+
+### ۲. بازاریابی اپلیکیشن بر پایه پیوند «کمتر بنشین، بهتر بخواب»
+
+زمان بی‌تحرکی، خواب کوتاه را تقریباً سه برابر قوی‌تر از شمار قدم پیش‌بینی می‌کند
+(r = `r round(cor(sa$sedentary_minutes, sa$hours_asleep), 2)` در برابر
+r = `r round(cor(sa$total_steps, sa$hours_asleep), 2)`). قابلیت اصلی اپلیکیشن حول
+همین رابطه ساخته شود، با پیوند دادن یادآوری‌های ساعتی حرکت به امتیاز خواب.
+
+*پیام تبلیغاتی:* **«امروز کمتر بنشین، امشب بهتر بخواب.»**
+
+### ۳. تنظیم اعلان‌ها روی دو اوج فعالیت
+
+فعالیت از ساعت ۱۲ تا ۱۴ و از ۱۷ تا ۱۹ به اوج می‌رسد. یادآوری‌های حرکت در همین
+بازه‌ها، برنامه روزانه در آرامش ساعت ۷ صبح، و یادآوری آماده‌شدن برای خواب حدود
+ساعت ۲۲ ارائه شود. این کم‌هزینه‌ترین توصیه از میان سه مورد و سریع‌ترین برای
+سنجش است.
+
+*پیام تبلیغاتی:* **«یادآوری، وقتی از پیش در حرکتی.»**
+
+## توصیه‌های پشتیبان
+
+**۴. فرم Leaf را به استدلال اصلی برای حفظ کاربر تبدیل کنید.** نرخ استفاده سقف
+هر قابلیت دیگری است. Leaf را با پیام *«ردیابی که از دستت درنمی‌آوری»* بازاریابی
+کنید و روزهای پیاپی **استفاده** را پاداش دهید، نه قدم‌های به‌دست‌آمده را.
+
+**۵. ثبت دستی را حذف کنید.** ثبت وزن تنها به `r percent(adopt$pct[3], 1)`
+کاربران رسید. فرض بر این باشد که هر قابلیت با ورود دستی شکست می‌خورد؛ اولویت با
+همگام‌سازی خودکار آب‌رسانی Spring و اتصال به ترازوی هوشمند باشد.
+
+**۶. محتوای عضویت را حول میانه هفته قرار دهید.** خواب و فعالیت هر دو در میانه
+هفته افت می‌کنند. محتوای مربیگری برای عصر یکشنبه و صبح سه‌شنبه برنامه‌ریزی شود.
+
+---
+
+# ۷. محدودیت‌ها و گام‌های بعدی
+
+```{r limitations}
+tibble(
+  `محدودیت` = c("اندازه نمونه", "داده جنسیت", "قدمت داده", "شیوه گردآوری",
+                "علیت", "تجمیع داده خواب"),
+  `توضیح` = c(
+    paste0(n_users, " شرکت‌کننده، بسیار کمتر از آنکه به بازار مصرف تعمیم داده شود"),
+    "ثبت نشده است، در حالی که بلابیت منحصراً به زنان می‌فروشد",
+    paste0("گردآوری از ", format(min(daily$date), "%Y/%m"), " تا ",
+           format(max(daily$date), "%Y/%m"), "، یعنی نه سال پیش"),
+    "داوطلبان خودانتخاب MTurk، که احتمالاً با پایگاه مشتریان بلابیت منطبق نیستند",
+    "پیوند بی‌تحرکی و خواب یک ارتباط است؛ جهت آن آزموده نشده",
+    "شب‌های مارس بر فرض مرز ساعت ۶ بامداد استوارند"
+  )
+) |>  kable(caption = "محدودیت‌های این یافته‌ها")
+```
+
+**این یافته‌ها باید پیش از تخصیص بودجه راستی‌آزمایی شوند.** گام‌های بعدی
+پیشنهادی، به ترتیب هزینه:
+
+۱. **آزمون A/B برای زمان‌بندی اعلان‌ها** در بازه‌های ۱۲ تا ۱۴ و ۱۷ تا ۱۹.
+   کم‌هزینه‌ترین برای اجرا و سریع‌ترین برای تأیید یا رد.
+۲. **تکرار این تحلیل روی داده‌های تله‌متری خود اپلیکیشن بلابیت**، جایی که
+   جنسیت، سن و خط محصول مشخص است؛ همان مجموعه داده افزوده‌ای که سرشن پیشنهاد داد.
+۳. **آزمودن هدف سازگارشونده** در برابر هدف ثابت ۱۰٬۰۰۰ قدم، با سنجش استفاده فعال
+   در ۳۰ روز به جای شمار قدم.
+۴. **نظرسنجی از کاربران رهاکننده** درباره اینکه چرا دستگاه را کنار گذاشتند، تا
+   روشن شود آیا فرم دستگاه واقعاً محدودیت اصلی نرخ استفاده است یا نه.
+
+---
+
+# پیوست
+
+## یادداشت درباره ترجمه
+
+این سند **ترجمه ماشینی** نسخه اصلی انگلیسی است که با یک مدل زبانی هوش مصنوعی
+انجام شده است. گزارش اصلی به زبان انگلیسی نوشته شده و تحلیل، کد و همه اعداد از
+همان نسخه اصلی می‌آیند.
+
+تنها متن، عنوان‌ها، برچسب جدول‌ها و متن نمودارها ترجمه شده‌اند. نام توابع، نام
+متغیرها، نام ستون‌ها و نام فایل‌ها به انگلیسی مانده‌اند، چون بخشی از کد و
+مجموعه داده هستند.
+
+در صورت هرگونه اختلاف میان این نسخه و اصل انگلیسی، **نسخه انگلیسی معتبر است**.
+این ترجمه توسط مترجم متخصص بومی بازبینی نشده است.
+
+```{r session info}
+sessionInfo()
+```
